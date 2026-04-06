@@ -1,1 +1,11 @@
 .opencode
+ethfuse
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+go.work
+vendor/

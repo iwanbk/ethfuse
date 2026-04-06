@@ -4,6 +4,8 @@ go 1.25.8
 
 require (
 	github.com/ethereum/go-ethereum v1.17.2
+	github.com/jellydator/ttlcache/v3 v3.4.0
+	go.etcd.io/bbolt v1.4.3
 	golang.org/x/time v0.15.0
 )
 

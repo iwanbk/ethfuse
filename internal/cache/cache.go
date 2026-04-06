@@ -18,6 +18,7 @@ const (
 	TTLAccount          = 30 * time.Second
 	TTLNegative         = 30 * time.Second
 	TTLENS              = 300 * time.Second // 5 minutes
+	TTLTxReceipt        = 30 * time.Second  // receipt cache TTL (same as account)
 )
 
 // Common errors returned by the cache.

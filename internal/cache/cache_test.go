@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -57,24 +58,24 @@ func TestCache_PersistentGetSet(t *testing.T) {
 	}
 
 	// Get persistent
-	got, ok := c.GetPersistent(bucket, key)
-	if !ok {
-		t.Error("GetPersistent failed: key not found")
+	got, err := c.GetPersistent(bucket, key)
+	if err != nil {
+		t.Errorf("GetPersistent failed: %v", err)
 	}
 	if string(got) != string(value) {
 		t.Errorf("GetPersistent returned %q, want %q", got, value)
 	}
 
 	// Test non-existent bucket
-	_, ok = c.GetPersistent("nonexistent", key)
-	if ok {
-		t.Error("GetPersistent succeeded for non-existent bucket")
+	_, err = c.GetPersistent("nonexistent", key)
+	if err == nil || !errors.Is(err, ErrBucketNotFound) {
+		t.Errorf("GetPersistent for non-existent bucket: got error %v, want ErrBucketNotFound", err)
 	}
 
 	// Test non-existent key
-	_, ok = c.GetPersistent(bucket, "nonexistent")
-	if ok {
-		t.Error("GetPersistent succeeded for non-existent key")
+	_, err = c.GetPersistent(bucket, "nonexistent")
+	if err == nil || !errors.Is(err, ErrKeyNotFound) {
+		t.Errorf("GetPersistent for non-existent key: got error %v, want ErrKeyNotFound", err)
 	}
 }
 
@@ -105,9 +106,9 @@ func TestCache_PersistentSurvivesRestart(t *testing.T) {
 	}
 	defer func() { _ = c2.Close() }()
 
-	got, ok := c2.GetPersistent(bucket, key)
-	if !ok {
-		t.Error("GetPersistent failed after restart: key not found")
+	got, err := c2.GetPersistent(bucket, key)
+	if err != nil {
+		t.Errorf("GetPersistent failed after restart: %v", err)
 	}
 	if string(got) != string(value) {
 		t.Errorf("GetPersistent after restart returned %q, want %q", got, value)
@@ -177,9 +178,9 @@ func TestCache_NoPersistentStorage(t *testing.T) {
 	defer func() { _ = c.Close() }()
 
 	// GetPersistent should fail
-	_, ok := c.GetPersistent("bucket", "key")
-	if ok {
-		t.Error("GetPersistent succeeded when persistent storage disabled")
+	_, err = c.GetPersistent("bucket", "key")
+	if err == nil || !errors.Is(err, ErrPersistentStorage) {
+		t.Errorf("GetPersistent when persistent storage disabled: got error %v, want ErrPersistentStorage", err)
 	}
 
 	// SetPersistent should error
@@ -208,5 +209,107 @@ func TestCache_Constants(t *testing.T) {
 	}
 	if TTLENS <= 0 {
 		t.Error("TTLENS must be positive")
+	}
+}
+
+func TestCache_InvalidInput(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	c, err := NewCache(dbPath)
+	if err != nil {
+		t.Fatalf("NewCache failed: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	// Test empty bucket
+	_, err = c.GetPersistent("", "key")
+	if err == nil || !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("GetPersistent with empty bucket: got error %v, want ErrInvalidInput", err)
+	}
+
+	// Test empty key
+	_, err = c.GetPersistent("bucket", "")
+	if err == nil || !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("GetPersistent with empty key: got error %v, want ErrInvalidInput", err)
+	}
+
+	// Test empty bucket in SetPersistent
+	err = c.SetPersistent("", "key", []byte("value"))
+	if err == nil || !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("SetPersistent with empty bucket: got error %v, want ErrInvalidInput", err)
+	}
+
+	// Test empty key in SetPersistent
+	err = c.SetPersistent("bucket", "", []byte("value"))
+	if err == nil || !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("SetPersistent with empty key: got error %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestCache_ClosedCache(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	c, err := NewCache(dbPath)
+	if err != nil {
+		t.Fatalf("NewCache failed: %v", err)
+	}
+
+	// Close the cache
+	err = c.Close()
+	if err != nil {
+		t.Errorf("Close failed: %v", err)
+	}
+
+	// Test Get on closed cache
+	val, ok := c.Get("key")
+	if ok {
+		t.Error("Get succeeded on closed cache")
+	}
+	if val != nil {
+		t.Error("Get returned non-nil value on closed cache")
+	}
+
+	// Test Set on closed cache (should not panic)
+	c.Set("key", []byte("value"), time.Second)
+
+	// Test GetPersistent on closed cache
+	_, err = c.GetPersistent("bucket", "key")
+	if err == nil || !errors.Is(err, ErrCacheClosed) {
+		t.Errorf("GetPersistent on closed cache: got error %v, want ErrCacheClosed", err)
+	}
+
+	// Test SetPersistent on closed cache
+	err = c.SetPersistent("bucket", "key", []byte("value"))
+	if err == nil || !errors.Is(err, ErrCacheClosed) {
+		t.Errorf("SetPersistent on closed cache: got error %v, want ErrCacheClosed", err)
+	}
+
+	// Test SetNegative on closed cache (should not panic)
+	c.SetNegative("/some/path")
+
+	// Test IsNegative on closed cache (should return false)
+	if c.IsNegative("/some/path") {
+		t.Error("IsNegative returned true on closed cache")
+	}
+}
+
+func TestCache_DoubleClose(t *testing.T) {
+	c, err := NewCache("")
+	if err != nil {
+		t.Fatalf("NewCache failed: %v", err)
+	}
+
+	// First close
+	err = c.Close()
+	if err != nil {
+		t.Errorf("First Close failed: %v", err)
+	}
+
+	// Second close should not error
+	err = c.Close()
+	if err != nil {
+		t.Errorf("Second Close returned error: %v", err)
 	}
 }

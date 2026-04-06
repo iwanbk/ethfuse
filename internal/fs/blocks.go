@@ -61,7 +61,14 @@ func decodeBlock(data []byte) (*types.Block, error) {
 }
 
 // fetchLatestBlockNumber returns the latest block number, using cache.
+// Uses TTLChainLatestBlock (10s) for chain/latest_block file.
 func fetchLatestBlockNumber(ctx context.Context, rpc rpc.RPCClient, c *cache.Cache) (uint64, error) {
+	return fetchLatestBlockNumberWithTTL(ctx, rpc, c, cache.TTLChainLatestBlock)
+}
+
+// fetchLatestBlockNumberWithTTL returns the latest block number with custom TTL.
+// This is used by LatestDirNode which requires 12s TTL (one block time).
+func fetchLatestBlockNumberWithTTL(ctx context.Context, rpc rpc.RPCClient, c *cache.Cache, ttl time.Duration) (uint64, error) {
 	// Try cache first
 	if data, ok := c.Get(cacheKeyLatestBlock); ok {
 		if len(data) == 8 {
@@ -77,7 +84,7 @@ func fetchLatestBlockNumber(ctx context.Context, rpc rpc.RPCClient, c *cache.Cac
 	// Store as big-endian bytes
 	var buf [8]byte
 	binary.BigEndian.PutUint64(buf[:], blockNum)
-	c.Set(cacheKeyLatestBlock, buf[:], cache.TTLChainLatestBlock)
+	c.Set(cacheKeyLatestBlock, buf[:], ttl)
 	return blockNum, nil
 }
 
@@ -325,13 +332,22 @@ func (r *RecentDirNode) Lookup(ctx context.Context, name string, out *fuse.Entry
 
 // Lookup implements NodeLookuper.
 // Called when the kernel looks up a child entry (e.g., ls /blocks/21000000).
-// name can be either "recent" or a block number as decimal string.
+// name can be "recent", "latest", or a block number as decimal string.
 // Returns a child node (directory or file) or ENOENT.
 func (b *BlocksDirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	if name == "recent" {
+	switch name {
+	case "recent":
 		child := NewRecentDirNode(b.rpc, b.cache)
 		ch := b.NewPersistentInode(ctx, child, fs.StableAttr{
 			Ino:  hashIno("/blocks/recent"),
+			Mode: fuse.S_IFDIR,
+		})
+		out.Mode = fuse.S_IFDIR | 0o755
+		return ch, 0
+	case "latest":
+		child := NewLatestDirNode(b.rpc, b.cache)
+		ch := b.NewPersistentInode(ctx, child, fs.StableAttr{
+			Ino:  hashIno("/blocks/latest"),
 			Mode: fuse.S_IFDIR,
 		})
 		out.Mode = fuse.S_IFDIR | 0o755
@@ -353,7 +369,7 @@ func (b *BlocksDirNode) Lookup(ctx context.Context, name string, out *fuse.Entry
 }
 
 // Readdir implements NodeReaddirer.
-// Returns directory entries for /blocks (only "recent" subdirectory).
+// Returns directory entries for /blocks (recent and latest subdirectories).
 // The kernel will call Lookup on each name we return.
 func (b *BlocksDirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	entries := []fuse.DirEntry{
@@ -362,12 +378,138 @@ func (b *BlocksDirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errn
 			Mode: fuse.S_IFDIR,
 			Ino:  hashIno("/blocks/recent"),
 		},
+		{
+			Name: "latest",
+			Mode: fuse.S_IFDIR,
+			Ino:  hashIno("/blocks/latest"),
+		},
 	}
 	return fs.NewListDirStream(entries), 0
 }
 
 // Getattr implements NodeGetattrer for BlocksDirNode.
 func (b *BlocksDirNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	out.Mode = fuse.S_IFDIR | 0o755
+	return 0
+}
+
+// LatestDirNode represents the /blocks/latest directory.
+// It always points to the current chain head, refreshed every 12s.
+type LatestDirNode struct {
+	fs.Inode
+	rpc   rpc.RPCClient
+	cache *cache.Cache
+}
+
+var _ fs.NodeLookuper = (*LatestDirNode)(nil)
+var _ fs.NodeReaddirer = (*LatestDirNode)(nil)
+var _ fs.NodeGetattrer = (*LatestDirNode)(nil)
+
+// NewLatestDirNode creates a new LatestDirNode.
+func NewLatestDirNode(rpc rpc.RPCClient, cache *cache.Cache) *LatestDirNode {
+	return &LatestDirNode{
+		rpc:   rpc,
+		cache: cache,
+	}
+}
+
+// Lookup implements NodeLookuper for LatestDirNode.
+// Returns child file nodes: info.json, hash, parent_hash, timestamp, txs directory.
+func (ln *LatestDirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	// Get latest block number with 12s TTL (one block time)
+	latest, err := fetchLatestBlockNumberWithTTL(ctx, ln.rpc, ln.cache, cache.TTLBlockLatest)
+	if err != nil {
+		if errors.Is(err, ethereum.NotFound) {
+			return nil, syscall.ENOENT
+		}
+		return nil, syscall.EIO
+	}
+	// Delegate to BlockFileNode or TxsDirNode based on name
+	switch name {
+	case fileNameInfoJSON:
+		child := NewBlockFileNode(latest, fileNameInfoJSON, ln.rpc, ln.cache)
+		ch := ln.NewPersistentInode(ctx, child, fs.StableAttr{
+			Ino:  hashIno("/blocks/latest/" + name),
+			Mode: fuse.S_IFREG,
+		})
+		out.Mode = fuse.S_IFREG | 0o644
+		out.Size = 0
+		return ch, 0
+	case fileNameHash:
+		child := NewBlockFileNode(latest, fileNameHash, ln.rpc, ln.cache)
+		ch := ln.NewPersistentInode(ctx, child, fs.StableAttr{
+			Ino:  hashIno("/blocks/latest/" + name),
+			Mode: fuse.S_IFREG,
+		})
+		out.Mode = fuse.S_IFREG | 0o644
+		out.Size = 0
+		return ch, 0
+	case fileNameParentHash:
+		child := NewBlockFileNode(latest, fileNameParentHash, ln.rpc, ln.cache)
+		ch := ln.NewPersistentInode(ctx, child, fs.StableAttr{
+			Ino:  hashIno("/blocks/latest/" + name),
+			Mode: fuse.S_IFREG,
+		})
+		out.Mode = fuse.S_IFREG | 0o644
+		out.Size = 0
+		return ch, 0
+	case fileNameTimestamp:
+		child := NewBlockFileNode(latest, fileNameTimestamp, ln.rpc, ln.cache)
+		ch := ln.NewPersistentInode(ctx, child, fs.StableAttr{
+			Ino:  hashIno("/blocks/latest/" + name),
+			Mode: fuse.S_IFREG,
+		})
+		out.Mode = fuse.S_IFREG | 0o644
+		out.Size = 0
+		return ch, 0
+	case dirNameTxs:
+		child := NewTxsDirNode(latest, ln.rpc, ln.cache)
+		ch := ln.NewPersistentInode(ctx, child, fs.StableAttr{
+			Ino:  hashIno("/blocks/latest/" + dirNameTxs),
+			Mode: fuse.S_IFDIR,
+		})
+		out.Mode = fuse.S_IFDIR | 0o755
+		return ch, 0
+	default:
+		return nil, syscall.ENOENT
+	}
+}
+
+// Readdir implements NodeReaddirer for LatestDirNode.
+// Returns directory entries for the latest block directory.
+func (ln *LatestDirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	entries := []fuse.DirEntry{
+		{
+			Name: fileNameInfoJSON,
+			Mode: fuse.S_IFREG,
+			Ino:  hashIno("/blocks/latest/" + fileNameInfoJSON),
+		},
+		{
+			Name: fileNameHash,
+			Mode: fuse.S_IFREG,
+			Ino:  hashIno("/blocks/latest/" + fileNameHash),
+		},
+		{
+			Name: fileNameParentHash,
+			Mode: fuse.S_IFREG,
+			Ino:  hashIno("/blocks/latest/" + fileNameParentHash),
+		},
+		{
+			Name: fileNameTimestamp,
+			Mode: fuse.S_IFREG,
+			Ino:  hashIno("/blocks/latest/" + fileNameTimestamp),
+		},
+		{
+			Name: dirNameTxs,
+			Mode: fuse.S_IFDIR,
+			Ino:  hashIno("/blocks/latest/" + dirNameTxs),
+		},
+	}
+	return fs.NewListDirStream(entries), 0
+}
+
+// Getattr implements NodeGetattrer for LatestDirNode.
+func (ln *LatestDirNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = fuse.S_IFDIR | 0o755
 	return 0
 }

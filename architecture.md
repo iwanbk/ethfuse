@@ -74,9 +74,10 @@
 ```
 /
 ├── blocks/
-│   ├── latest/               ← TTL 5s, always fresh
+│   ├── latest/               ← TTL 12s, always fresh
 │   │   ├── info.json
 │   │   ├── hash
+│   │   ├── parent_hash
 │   │   ├── timestamp
 │   │   └── txs/
 │   ├── pending/              ← [v2] never cached, always live

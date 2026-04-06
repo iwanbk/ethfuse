@@ -270,11 +270,10 @@ func TestBlockFileNodeContent(t *testing.T) {
 
 	// Test each file type
 	tests := []struct {
-		fileType string
 		check    func(content []byte) error
+		fileType string
 	}{
 		{
-			fileType: fileNameHash,
 			check: func(content []byte) error {
 				expected := block.Hash().Hex() + "\n"
 				if string(content) != expected {
@@ -282,9 +281,9 @@ func TestBlockFileNodeContent(t *testing.T) {
 				}
 				return nil
 			},
+			fileType: fileNameHash,
 		},
 		{
-			fileType: fileNameParentHash,
 			check: func(content []byte) error {
 				expected := block.ParentHash().Hex() + "\n"
 				if string(content) != expected {
@@ -292,9 +291,9 @@ func TestBlockFileNodeContent(t *testing.T) {
 				}
 				return nil
 			},
+			fileType: fileNameParentHash,
 		},
 		{
-			fileType: fileNameTimestamp,
 			check: func(content []byte) error {
 				expected := strconv.FormatUint(block.Time(), 10) + "\n"
 				if string(content) != expected {
@@ -302,9 +301,9 @@ func TestBlockFileNodeContent(t *testing.T) {
 				}
 				return nil
 			},
+			fileType: fileNameTimestamp,
 		},
 		{
-			fileType: fileNameInfoJSON,
 			check: func(content []byte) error {
 				// Verify JSON structure and fields
 				var info map[string]interface{}
@@ -324,6 +323,7 @@ func TestBlockFileNodeContent(t *testing.T) {
 				}
 				return nil
 			},
+			fileType: fileNameInfoJSON,
 		},
 	}
 

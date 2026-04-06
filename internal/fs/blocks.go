@@ -292,8 +292,8 @@ type BlockFileNode struct {
 	fs.Inode
 	rpc      rpc.RPCClient
 	cache    *cache.Cache
-	blockNum uint64
 	fileType string // one of fileNameInfoJSON, fileNameHash, fileNameParentHash, fileNameTimestamp
+	blockNum uint64
 }
 
 var _ fs.NodeReader = (*BlockFileNode)(nil)

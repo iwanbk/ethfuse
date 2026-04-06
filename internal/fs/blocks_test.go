@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/big"
 	"strconv"
+	"sync"
 	"syscall"
 	"testing"
 
@@ -498,4 +499,323 @@ func TestTxsDirNode_Lookup(t *testing.T) {
 			t.Errorf("Lookup non-existent hash errno = %v, want ENOENT", errno3)
 		}
 	})
+}
+
+// mockCountingRPCClient wraps mockBlockRPCClient and counts RPC calls.
+type mockCountingRPCClient struct {
+	*mockBlockRPCClient
+	blockByNumberCalls int
+	mu                 sync.Mutex
+}
+
+func newMockCountingRPCClient() *mockCountingRPCClient {
+	return &mockCountingRPCClient{
+		mockBlockRPCClient: newMockBlockRPCClient(),
+	}
+}
+
+func (m *mockCountingRPCClient) BlockByNumber(ctx context.Context, n *big.Int) (*types.Block, error) {
+	m.mu.Lock()
+	m.blockByNumberCalls++
+	m.mu.Unlock()
+	return m.mockBlockRPCClient.BlockByNumber(ctx, n)
+}
+
+func (m *mockCountingRPCClient) resetCount() {
+	m.mu.Lock()
+	m.blockByNumberCalls = 0
+	m.mu.Unlock()
+}
+
+func (m *mockCountingRPCClient) getCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.blockByNumberCalls
+}
+
+func TestLatestDirNode_Readdir(t *testing.T) {
+	mockRPC := newMockCountingRPCClient()
+	// Create mock blocks
+	var parentHash common.Hash = common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000000")
+	for i := uint64(0); i < 10; i++ {
+		mockRPC.addMockBlock(i, parentHash, i*10)
+		parentHash = mockRPC.blocks[i].Hash()
+	}
+	c := newTestCache(t)
+	node := NewLatestDirNode(mockRPC, c)
+
+	stream, errno := node.Readdir(context.Background())
+	if errno != 0 {
+		t.Fatalf("Readdir errno = %v, want 0", errno)
+	}
+
+	var entries []fuse.DirEntry
+	for stream.HasNext() {
+		entry, errno := stream.Next()
+		if errno != 0 {
+			t.Fatalf("Next errno = %v", errno)
+		}
+		entries = append(entries, entry)
+	}
+
+	// Should have 5 entries: info.json, hash, parent_hash, timestamp, txs
+	expectedEntries := map[string]uint32{
+		fileNameInfoJSON:   fuse.S_IFREG,
+		fileNameHash:       fuse.S_IFREG,
+		fileNameParentHash: fuse.S_IFREG,
+		fileNameTimestamp:  fuse.S_IFREG,
+		dirNameTxs:         fuse.S_IFDIR,
+	}
+
+	if len(entries) != len(expectedEntries) {
+		t.Errorf("got %d entries, want %d", len(entries), len(expectedEntries))
+	}
+
+	for _, entry := range entries {
+		expectedMode, ok := expectedEntries[entry.Name]
+		if !ok {
+			t.Errorf("unexpected entry: %s", entry.Name)
+			continue
+		}
+		if entry.Mode&^0o777 != expectedMode {
+			t.Errorf("entry %s mode = %o, want %o", entry.Name, entry.Mode&^0o777, expectedMode)
+		}
+	}
+}
+
+func TestLatestDirNode_TTLBehavior(t *testing.T) {
+	ctx := context.Background()
+	mockRPC := newMockCountingRPCClient()
+
+	// Create mock blocks
+	var parentHash common.Hash = common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000000")
+	for i := uint64(0); i < 10; i++ {
+		mockRPC.addMockBlock(i, parentHash, i*10)
+		parentHash = mockRPC.blocks[i].Hash()
+	}
+
+	c := newTestCache(t)
+
+	// Test fetchLatestBlockNumber caching behavior directly
+	// First call should trigger RPC
+	_, err := fetchLatestBlockNumber(ctx, mockRPC, c)
+	if err != nil {
+		t.Fatalf("fetchLatestBlockNumber failed: %v", err)
+	}
+
+	firstCallCount := mockRPC.getCount()
+	if firstCallCount != 1 {
+		t.Errorf("first fetchLatestBlockNumber triggered %d RPC calls, want 1", firstCallCount)
+	}
+
+	// Second call within TTL should NOT trigger RPC
+	mockRPC.resetCount()
+	_, err = fetchLatestBlockNumber(ctx, mockRPC, c)
+	if err != nil {
+		t.Fatalf("second fetchLatestBlockNumber failed: %v", err)
+	}
+
+	secondCallCount := mockRPC.getCount()
+	if secondCallCount != 0 {
+		t.Errorf("second fetchLatestBlockNumber within TTL triggered %d RPC calls, want 0", secondCallCount)
+	}
+
+	// Manually expire the cache to simulate TTL expiry
+	c.Set("chain/latest_block", nil, 0)
+
+	// After TTL expires, next call should trigger RPC
+	mockRPC.resetCount()
+	_, err = fetchLatestBlockNumber(ctx, mockRPC, c)
+	if err != nil {
+		t.Fatalf("third fetchLatestBlockNumber failed: %v", err)
+	}
+
+	thirdCallCount := mockRPC.getCount()
+	if thirdCallCount != 1 {
+		t.Errorf("fetchLatestBlockNumber after TTL expiry triggered %d RPC calls, want 1", thirdCallCount)
+	}
+}
+
+func TestLatestDirNode_Lookup(t *testing.T) {
+	// Skip: Lookup requires a mounted FUSE bridge to test properly.
+	// The go-fuse library requires a mounted filesystem for Lookup operations
+	// to work correctly with the kernel interface.
+	t.Skip("Lookup requires mounted bridge, skipping for now")
+}
+
+func TestLatestDirNode_LookupValidation(t *testing.T) {
+	ctx := context.Background()
+	mockRPC := newMockCountingRPCClient()
+
+	// Create mock blocks
+	var parentHash common.Hash = common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000000")
+	for i := uint64(0); i < 10; i++ {
+		mockRPC.addMockBlock(i, parentHash, i*10)
+		parentHash = mockRPC.blocks[i].Hash()
+	}
+
+	c := newTestCache(t)
+	node := NewLatestDirNode(mockRPC, c)
+
+	// Test Lookup with invalid name (should return ENOENT)
+	out := &fuse.EntryOut{}
+	_, errno := node.Lookup(ctx, "invalid_name", out)
+	if errno != syscall.ENOENT {
+		t.Errorf("Lookup(invalid_name) errno = %v, want ENOENT", errno)
+	}
+
+	// Test Lookup with empty name (should return ENOENT)
+	_, errno = node.Lookup(ctx, "", out)
+	if errno != syscall.ENOENT {
+		t.Errorf("Lookup(empty) errno = %v, want ENOENT", errno)
+	}
+}
+
+func TestBlocksDirNode_LookupLatest(t *testing.T) {
+	// Skip: Lookup requires a mounted FUSE bridge to test properly.
+	// The go-fuse library requires a mounted filesystem for Lookup operations
+	// to work correctly with the kernel interface.
+	t.Skip("Lookup requires mounted bridge, skipping for now")
+}
+
+func TestBlocksDirNode_ReaddirIncludesLatest(t *testing.T) {
+	ctx := context.Background()
+	mockRPC := newMockBlockRPCClient()
+	c := newTestCache(t)
+	node := NewBlocksDirNode(mockRPC, c)
+
+	stream, errno := node.Readdir(ctx)
+	if errno != 0 {
+		t.Fatalf("Readdir errno = %v", errno)
+	}
+
+	var entries []fuse.DirEntry
+	for stream.HasNext() {
+		entry, errno := stream.Next()
+		if errno != 0 {
+			t.Fatalf("Next errno = %v", errno)
+		}
+		entries = append(entries, entry)
+	}
+
+	// Should have "recent" and "latest"
+	expectedNames := map[string]bool{
+		"recent": true,
+		"latest": true,
+	}
+
+	for _, entry := range entries {
+		if !expectedNames[entry.Name] {
+			t.Errorf("unexpected entry: %s", entry.Name)
+		}
+		delete(expectedNames, entry.Name)
+	}
+
+	if len(expectedNames) != 0 {
+		t.Errorf("missing entries: %v", expectedNames)
+	}
+}
+
+// mockErrorRPCClient returns errors for all RPC calls.
+type mockErrorRPCClient struct{}
+
+func (m *mockErrorRPCClient) Close() {}
+func (m *mockErrorRPCClient) BlockByNumber(ctx context.Context, n *big.Int) (*types.Block, error) {
+	return nil, errors.New("RPC error")
+}
+func (m *mockErrorRPCClient) TransactionByHash(ctx context.Context, hash common.Hash) (*types.Transaction, error) {
+	return nil, ethereum.NotFound
+}
+func (m *mockErrorRPCClient) TransactionReceipt(ctx context.Context, hash common.Hash) (*types.Receipt, error) {
+	return nil, ethereum.NotFound
+}
+func (m *mockErrorRPCClient) BalanceAt(ctx context.Context, addr common.Address, block *big.Int) (*big.Int, error) {
+	return big.NewInt(0), nil
+}
+func (m *mockErrorRPCClient) NonceAt(ctx context.Context, addr common.Address, block *big.Int) (uint64, error) {
+	return 0, nil
+}
+func (m *mockErrorRPCClient) CodeAt(ctx context.Context, addr common.Address, block *big.Int) ([]byte, error) {
+	return nil, nil
+}
+func (m *mockErrorRPCClient) ChainID(ctx context.Context) (*big.Int, error) {
+	return big.NewInt(1), nil
+}
+func (m *mockErrorRPCClient) FeeHistory(ctx context.Context, blockCount uint64, lastBlock *big.Int, rewardPercentiles []float64) (*ethereum.FeeHistory, error) {
+	return nil, nil
+}
+func (m *mockErrorRPCClient) CallContract(ctx context.Context, call ethereum.CallMsg, block *big.Int) ([]byte, error) {
+	return nil, nil
+}
+
+func TestLatestDirNode_ErrorHandling(t *testing.T) {
+	ctx := context.Background()
+	mockRPC := &mockErrorRPCClient{}
+	c := newTestCache(t)
+	node := NewLatestDirNode(mockRPC, c)
+
+	// Readdir returns static entries, no RPC call needed
+	// So it should succeed even with error RPC client
+	stream, errno := node.Readdir(ctx)
+	if errno != 0 {
+		t.Errorf("Readdir errno = %v, want 0 (no RPC call needed)", errno)
+	} else {
+		// Verify we get the expected entries
+		var entries []fuse.DirEntry
+		for stream.HasNext() {
+			entry, nextErrno := stream.Next()
+			if nextErrno != 0 {
+				t.Fatalf("Next errno = %v", nextErrno)
+			}
+			entries = append(entries, entry)
+		}
+		// Should have 5 entries
+		if len(entries) != 5 {
+			t.Errorf("got %d entries, want 5", len(entries))
+		}
+	}
+
+	// Lookup should return EIO when RPC fails
+	out := &fuse.EntryOut{}
+	_, errno = node.Lookup(ctx, fileNameHash, out)
+	if errno != syscall.EIO {
+		t.Errorf("Lookup with RPC error errno = %v, want EIO", errno)
+	}
+}
+
+func TestFetchLatestBlockNumberWithTTL(t *testing.T) {
+	ctx := context.Background()
+	mockRPC := newMockCountingRPCClient()
+
+	// Create mock blocks
+	var parentHash common.Hash = common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000000")
+	for i := uint64(0); i < 10; i++ {
+		mockRPC.addMockBlock(i, parentHash, i*10)
+		parentHash = mockRPC.blocks[i].Hash()
+	}
+
+	c := newTestCache(t)
+
+	// Test with custom TTL (12s)
+	_, err := fetchLatestBlockNumberWithTTL(ctx, mockRPC, c, cache.TTLBlockLatest)
+	if err != nil {
+		t.Fatalf("fetchLatestBlockNumberWithTTL failed: %v", err)
+	}
+
+	firstCallCount := mockRPC.getCount()
+	if firstCallCount != 1 {
+		t.Errorf("first fetchLatestBlockNumberWithTTL triggered %d RPC calls, want 1", firstCallCount)
+	}
+
+	// Second call within TTL should NOT trigger RPC
+	mockRPC.resetCount()
+	_, err = fetchLatestBlockNumberWithTTL(ctx, mockRPC, c, cache.TTLBlockLatest)
+	if err != nil {
+		t.Fatalf("second fetchLatestBlockNumberWithTTL failed: %v", err)
+	}
+
+	secondCallCount := mockRPC.getCount()
+	if secondCallCount != 0 {
+		t.Errorf("second fetchLatestBlockNumberWithTTL within TTL triggered %d RPC calls, want 0", secondCallCount)
+	}
 }

@@ -20,11 +20,6 @@ import (
 	"github.com/iwanbk/ethfuse/internal/rpc"
 )
 
-var (
-	_ = cache.TTLChainLatestBlock
-	_ = rpc.RPCClient(nil)
-)
-
 // mockBlockRPCClient is a mock RPCClient that returns predefined blocks.
 type mockBlockRPCClient struct {
 	blocks map[uint64]*types.Block
@@ -163,7 +158,7 @@ func TestFetchBlock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create cache: %v", err)
 	}
-	defer func() { _ = c.Close() }()
+	defer c.Close()
 
 	// First fetch should call RPC
 	block, err := fetchBlock(ctx, 1000, mockRPC, c)
@@ -209,7 +204,7 @@ func TestFetchBlockFinalization(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create cache: %v", err)
 	}
-	defer func() { _ = c.Close() }()
+	defer c.Close()
 
 	// Fetch block 1988 (should be finalized)
 	block, err := fetchBlock(ctx, 1988, mockRPC, c)

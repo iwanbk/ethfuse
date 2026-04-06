@@ -1,5 +1,6 @@
 .opencode
 ethfuse
+CLAUDE.md
 *.exe
 *.exe~
 *.dll

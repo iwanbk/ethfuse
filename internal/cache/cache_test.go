@@ -12,7 +12,7 @@ func TestCache_MemoryGetSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCache failed: %v", err)
 	}
-	defer func() { _ = c.Close() }()
+	defer c.Close()
 
 	key := "testkey"
 	value := []byte("testvalue")
@@ -45,7 +45,7 @@ func TestCache_PersistentGetSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCache failed: %v", err)
 	}
-	defer func() { _ = c.Close() }()
+	defer c.Close()
 
 	bucket := "testbucket"
 	key := "testkey"
@@ -97,14 +97,14 @@ func TestCache_PersistentSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SetPersistent failed: %v", err)
 	}
-	_ = c1.Close()
+	c1.Close()
 
 	// Reopen cache, read back
 	c2, err := NewCache(dbPath)
 	if err != nil {
 		t.Fatalf("NewCache failed on reopen: %v", err)
 	}
-	defer func() { _ = c2.Close() }()
+	defer c2.Close()
 
 	got, err := c2.GetPersistent(bucket, key)
 	if err != nil {
@@ -120,7 +120,7 @@ func TestCache_NegativeSetGet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCache failed: %v", err)
 	}
-	defer func() { _ = c.Close() }()
+	defer c.Close()
 
 	path := "/some/invalid/path"
 
@@ -156,7 +156,7 @@ func TestCache_NegativeExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCache failed: %v", err)
 	}
-	defer func() { _ = c.Close() }()
+	defer c.Close()
 
 	path := "/some/invalid/path"
 	c.SetNegative(path)
@@ -175,7 +175,7 @@ func TestCache_NoPersistentStorage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCache failed: %v", err)
 	}
-	defer func() { _ = c.Close() }()
+	defer c.Close()
 
 	// GetPersistent should fail
 	_, err = c.GetPersistent("bucket", "key")
@@ -220,7 +220,7 @@ func TestCache_InvalidInput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCache failed: %v", err)
 	}
-	defer func() { _ = c.Close() }()
+	defer c.Close()
 
 	// Test empty bucket
 	_, err = c.GetPersistent("", "key")

@@ -7,8 +7,7 @@ import (
 )
 
 func TestLoad_DefaultConfig(t *testing.T) {
-	// Ensure no env var is set
-	_ = os.Unsetenv("ETHFUSE_RPC_URL")
+	os.Unsetenv("ETHFUSE_RPC_URL")
 
 	cfg, err := Load("")
 	if err != nil {
@@ -24,8 +23,7 @@ func TestLoad_DefaultConfig(t *testing.T) {
 }
 
 func TestLoad_ConfigFile(t *testing.T) {
-	// Ensure no env var is set
-	_ = os.Unsetenv("ETHFUSE_RPC_URL")
+	os.Unsetenv("ETHFUSE_RPC_URL")
 
 	// Create a temporary config file
 	tmpDir := t.TempDir()
@@ -43,8 +41,8 @@ log_level = "debug"
 
 	// Temporarily override home directory
 	origHome := os.Getenv("HOME")
-	_ = os.Setenv("HOME", tmpDir)
-	defer func() { _ = os.Setenv("HOME", origHome) }()
+	os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", origHome)
 
 	cfg, err := Load("")
 	if err != nil {
@@ -76,11 +74,11 @@ log_level = "debug"
 
 	// Temporarily override home directory and env var
 	origHome := os.Getenv("HOME")
-	_ = os.Setenv("HOME", tmpDir)
-	defer func() { _ = os.Setenv("HOME", origHome) }()
+	os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", origHome)
 
-	_ = os.Setenv("ETHFUSE_RPC_URL", "https://env-override.com/rpc")
-	defer func() { _ = os.Unsetenv("ETHFUSE_RPC_URL") }()
+	os.Setenv("ETHFUSE_RPC_URL", "https://env-override.com/rpc")
+	defer os.Unsetenv("ETHFUSE_RPC_URL")
 
 	cfg, err := Load("")
 	if err != nil {
@@ -113,11 +111,11 @@ log_level = "debug"
 
 	// Temporarily override home directory and env var
 	origHome := os.Getenv("HOME")
-	_ = os.Setenv("HOME", tmpDir)
-	defer func() { _ = os.Setenv("HOME", origHome) }()
+	os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", origHome)
 
-	_ = os.Setenv("ETHFUSE_RPC_URL", "https://env-override.com/rpc")
-	defer func() { _ = os.Unsetenv("ETHFUSE_RPC_URL") }()
+	os.Setenv("ETHFUSE_RPC_URL", "https://env-override.com/rpc")
+	defer os.Unsetenv("ETHFUSE_RPC_URL")
 
 	cfg, err := Load("https://cli-flag.com/rpc")
 	if err != nil {

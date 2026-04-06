@@ -5,9 +5,10 @@ linters:
     - unused
     - ineffassign
     - misspell
-    - errcheck
     - revive
     - goimports
+  disable:
+    - errcheck
 
 linters-settings:
   govet:

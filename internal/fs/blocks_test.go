@@ -144,6 +144,9 @@ func TestRecentDirNode_Readdir(t *testing.T) {
 }
 
 func TestBlocksDirNode_LookupUnknownBlock(t *testing.T) {
+	// Skip: Lookup requires a mounted FUSE bridge to test properly.
+	// The go-fuse library requires a mounted filesystem for Lookup operations
+	// to work correctly with the kernel interface.
 	t.Skip("Lookup requires mounted bridge, skipping for now")
 }
 
@@ -197,7 +200,7 @@ func TestFetchBlockFinalization(t *testing.T) {
 	mockRPC := newMockBlockRPCClient()
 	// Add latest block at height 2000
 	mockRPC.addMockBlock(2000, common.HexToHash("0xabcd"), 2000000)
-	// Add a block at height 1988 (difference = 12, finalized)
+	// Add a block at height 1988 (difference = BlockFinalizationConfirmations, finalized)
 	mockRPC.addMockBlock(1988, common.HexToHash("0x1234"), 1988000)
 
 	tempDir := t.TempDir()
@@ -349,5 +352,6 @@ func TestGhostAccess(t *testing.T) {
 	// Create RecentDirNode with blocks 100-199
 	// Lookup block 50 (not in recent list) should succeed
 	// This tests that Lookup works for any block number
+	// Skip: Requires mounted FUSE bridge to test Lookup with kernel interface
 	t.Skip("Requires mounted bridge")
 }

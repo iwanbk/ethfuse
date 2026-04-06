@@ -499,3 +499,192 @@ func TestTxsDirNode_Lookup(t *testing.T) {
 		}
 	})
 }
+
+// countingBlockRPCClient wraps mockBlockRPCClient and counts BlockByNumber calls.
+type countingBlockRPCClient struct {
+	*mockBlockRPCClient
+	blockByNumberCalls int
+}
+
+func newCountingBlockRPCClient() *countingBlockRPCClient {
+	return &countingBlockRPCClient{
+		mockBlockRPCClient: newMockBlockRPCClient(),
+	}
+}
+
+func (c *countingBlockRPCClient) BlockByNumber(ctx context.Context, n *big.Int) (*types.Block, error) {
+	c.blockByNumberCalls++
+	return c.mockBlockRPCClient.BlockByNumber(ctx, n)
+}
+func (c *countingBlockRPCClient) TransactionByHash(ctx context.Context, hash common.Hash) (*types.Transaction, error) {
+	c.blockByNumberCalls++
+	return c.mockBlockRPCClient.TransactionByHash(ctx, hash)
+}
+func (c *countingBlockRPCClient) TransactionReceipt(ctx context.Context, hash common.Hash) (*types.Receipt, error) {
+	return c.mockBlockRPCClient.TransactionReceipt(ctx, hash)
+}
+func (c *countingBlockRPCClient) BalanceAt(ctx context.Context, addr common.Address, block *big.Int) (*big.Int, error) {
+	return c.mockBlockRPCClient.BalanceAt(ctx, addr, block)
+}
+func (c *countingBlockRPCClient) NonceAt(ctx context.Context, addr common.Address, block *big.Int) (uint64, error) {
+	return c.mockBlockRPCClient.NonceAt(ctx, addr, block)
+}
+func (c *countingBlockRPCClient) CodeAt(ctx context.Context, addr common.Address, block *big.Int) ([]byte, error) {
+	return c.mockBlockRPCClient.CodeAt(ctx, addr, block)
+}
+func (c *countingBlockRPCClient) ChainID(ctx context.Context) (*big.Int, error) {
+	return c.mockBlockRPCClient.ChainID(ctx)
+}
+func (c *countingBlockRPCClient) FeeHistory(ctx context.Context, blockCount uint64, lastBlock *big.Int, rewardPercentiles []float64) (*ethereum.FeeHistory, error) {
+	return c.mockBlockRPCClient.FeeHistory(ctx, blockCount, lastBlock, rewardPercentiles)
+}
+func (c *countingBlockRPCClient) CallContract(ctx context.Context, call ethereum.CallMsg, block *big.Int) ([]byte, error) {
+	return c.mockBlockRPCClient.CallContract(ctx, call, block)
+}
+
+func TestLatestDirNode_Readdir(t *testing.T) {
+	ctx := context.Background()
+	mockRPC := newCountingBlockRPCClient()
+	// Add mock blocks
+	var parentHash common.Hash = common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000000")
+	for i := uint64(0); i <= 100; i++ {
+		mockRPC.addMockBlock(i, parentHash, i*10)
+		parentHash = mockRPC.blocks[i].Hash()
+	}
+
+	cache := newTestCache(t)
+	node := NewLatestDirNode(mockRPC, cache)
+
+	// Readdir returns static entries, no RPC call needed
+	stream, errno := node.Readdir(ctx)
+	if errno != 0 {
+		t.Fatalf("Readdir errno = %v, want 0", errno)
+	}
+
+	// Verify entries
+	var entries []fuse.DirEntry
+	for stream.HasNext() {
+		entry, errno := stream.Next()
+		if errno != 0 {
+			t.Fatalf("Next errno = %v", errno)
+		}
+		entries = append(entries, entry)
+	}
+
+	// Should have 4 entries: info.json, hash, timestamp, txs/
+	expectedEntries := []string{fileNameInfoJSON, fileNameHash, fileNameTimestamp, dirNameTxs}
+	if len(entries) != len(expectedEntries) {
+		t.Errorf("got %d entries, want %d", len(entries), len(expectedEntries))
+	}
+	for i, expected := range expectedEntries {
+		if i < len(entries) && entries[i].Name != expected {
+			t.Errorf("entry[%d] name = %s, want %s", i, entries[i].Name, expected)
+		}
+	}
+
+	// Readdir should NOT trigger RPC calls (entries are static)
+	if mockRPC.blockByNumberCalls != 0 {
+		t.Errorf("blockByNumberCalls = %d, want 0 (Readdir is static)", mockRPC.blockByNumberCalls)
+	}
+}
+
+func TestLatestDirNode_FetchLatestBlockNumberCaching(t *testing.T) {
+	ctx := context.Background()
+	mockRPC := newCountingBlockRPCClient()
+	// Add mock blocks
+	var parentHash common.Hash = common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000000")
+	for i := uint64(0); i <= 100; i++ {
+		mockRPC.addMockBlock(i, parentHash, i*10)
+		parentHash = mockRPC.blocks[i].Hash()
+	}
+
+	cache := newTestCache(t)
+
+	// First call to fetchLatestBlockNumber should trigger RPC call
+	_, err := fetchLatestBlockNumber(ctx, mockRPC, cache)
+	if err != nil {
+		t.Fatalf("fetchLatestBlockNumber failed: %v", err)
+	}
+	if mockRPC.blockByNumberCalls != 1 {
+		t.Errorf("first fetchLatestBlockNumber: blockByNumberCalls = %d, want 1", mockRPC.blockByNumberCalls)
+	}
+
+	// Second call within TTL should NOT trigger RPC call (uses cache)
+	_, err = fetchLatestBlockNumber(ctx, mockRPC, cache)
+	if err != nil {
+		t.Fatalf("second fetchLatestBlockNumber failed: %v", err)
+	}
+	if mockRPC.blockByNumberCalls != 1 {
+		t.Errorf("second fetchLatestBlockNumber within TTL: blockByNumberCalls = %d, want 1 (cached)", mockRPC.blockByNumberCalls)
+	}
+
+	// Expire the cache entry to simulate TTL expiry
+	cache.Set(cacheKeyLatestBlock, nil, 0)
+
+	// Third call after TTL expiry should trigger RPC call again
+	_, err = fetchLatestBlockNumber(ctx, mockRPC, cache)
+	if err != nil {
+		t.Fatalf("third fetchLatestBlockNumber failed: %v", err)
+	}
+	if mockRPC.blockByNumberCalls != 2 {
+		t.Errorf("third fetchLatestBlockNumber after TTL expiry: blockByNumberCalls = %d, want 2", mockRPC.blockByNumberCalls)
+	}
+}
+
+func TestLatestDirNode_Lookup(t *testing.T) {
+	// Skip: Lookup requires a mounted FUSE bridge to test properly.
+	// The go-fuse library requires a mounted filesystem for Lookup operations
+	// to work correctly with the kernel interface.
+	t.Skip("Lookup requires mounted bridge, skipping for now")
+}
+
+func TestBlocksDirNode_LookupLatest(t *testing.T) {
+	// Skip: Lookup requires a mounted FUSE bridge to test properly.
+	// The go-fuse library requires a mounted filesystem for Lookup operations
+	// to work correctly with the kernel interface.
+	t.Skip("Lookup requires mounted bridge, skipping for now")
+}
+
+func TestBlocksDirNode_ReaddirIncludesLatest(t *testing.T) {
+	ctx := context.Background()
+	mockRPC := newMockBlockRPCClient()
+	cache := newTestCache(t)
+	node := NewBlocksDirNode(mockRPC, cache)
+
+	stream, errno := node.Readdir(ctx)
+	if errno != 0 {
+		t.Fatalf("Readdir errno = %v, want 0", errno)
+	}
+
+	var entries []fuse.DirEntry
+	for stream.HasNext() {
+		entry, errno := stream.Next()
+		if errno != 0 {
+			t.Fatalf("Next errno = %v", errno)
+		}
+		entries = append(entries, entry)
+	}
+
+	// Should have 2 entries: recent and latest
+	if len(entries) != 2 {
+		t.Errorf("got %d entries, want 2", len(entries))
+	}
+
+	foundRecent := false
+	foundLatest := false
+	for _, entry := range entries {
+		if entry.Name == "recent" {
+			foundRecent = true
+		}
+		if entry.Name == "latest" {
+			foundLatest = true
+		}
+	}
+
+	if !foundRecent {
+		t.Error("entries missing 'recent'")
+	}
+	if !foundLatest {
+		t.Error("entries missing 'latest'")
+	}
+}

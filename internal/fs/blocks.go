@@ -3,15 +3,18 @@ package fs
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"hash/fnv"
 	"math/big"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -29,12 +32,15 @@ func hashIno(path string) uint64 {
 }
 
 const (
-	cacheKeyBlockPrefix = "block:"
-	cacheKeyLatestBlock = "chain/latest_block"
-	fileNameInfoJSON    = "info.json"
-	fileNameHash        = "hash"
-	fileNameParentHash  = "parent_hash"
-	fileNameTimestamp   = "timestamp"
+	cacheKeyBlockPrefix     = "block:"
+	cacheKeyTxReceiptPrefix = "txr:"
+	cacheKeyLatestBlock     = "chain/latest_block"
+	fileNameInfoJSON        = "info.json"
+	fileNameHash            = "hash"
+	fileNameParentHash      = "parent_hash"
+	fileNameTimestamp       = "timestamp"
+	fileNameReceiptJSON     = "receipt.json"
+	dirNameTxs              = "txs"
 	// BlockFinalizationConfirmations is the number of confirmations required for a block to be considered finalized.
 	// Finalized blocks are stored in persistent storage (bbolt), non-finalized blocks use TTL-based memory cache.
 	BlockFinalizationConfirmations = 12
@@ -133,6 +139,92 @@ func fetchBlock(ctx context.Context, blockNum uint64, rpc rpc.RPCClient, c *cach
 		c.Set(key, data, cache.TTLBlockLatest)
 	}
 	return block, nil
+}
+
+// encodeReceipt serializes a receipt to bytes using RLP.
+func encodeReceipt(receipt *types.Receipt) ([]byte, error) {
+	return rlp.EncodeToBytes(receipt)
+}
+
+// decodeReceipt deserializes bytes into a receipt.
+func decodeReceipt(data []byte) (*types.Receipt, error) {
+	var receipt types.Receipt
+	if err := rlp.DecodeBytes(data, &receipt); err != nil {
+		return nil, err
+	}
+	return &receipt, nil
+}
+
+// fetchTransactionReceipt retrieves a transaction receipt by hash, using cache and finalization logic.
+// blockNum is the block number containing the transaction (optional, zero means unknown).
+// If blockNum is zero, it will be extracted from the receipt itself.
+func fetchTransactionReceipt(ctx context.Context, txHash common.Hash, blockNum uint64, rpc rpc.RPCClient, c *cache.Cache) (*types.Receipt, error) {
+	key := cacheKeyTxReceiptPrefix + txHash.Hex()
+	// Check negative cache first
+	if c.IsNegative(key) {
+		return nil, ethereum.NotFound
+	}
+	// First try memory cache
+	if data, ok := c.Get(key); ok {
+		receipt, err := decodeReceipt(data)
+		if err == nil {
+			return receipt, nil
+		}
+		// If decode fails, fall through to fetch
+	}
+	// Then try persistent storage
+	if data, err := c.GetPersistent("receipts", key); err == nil {
+		receipt, err := decodeReceipt(data)
+		if err == nil {
+			// Also populate memory cache with long TTL (1 hour) since receipt is finalized
+			c.Set(key, data, time.Hour)
+			return receipt, nil
+		}
+	}
+	// Fetch from RPC
+	receipt, err := rpc.TransactionReceipt(ctx, txHash)
+	if err != nil {
+		// Check if it's a not found error
+		if errors.Is(err, ethereum.NotFound) {
+			// Negative caching
+			c.SetNegative(key)
+		}
+		return nil, err
+	}
+	// Determine block number from receipt if not provided
+	if blockNum == 0 {
+		blockNum = receipt.BlockNumber.Uint64()
+	}
+	// Encode receipt
+	data, err := encodeReceipt(receipt)
+	if err != nil {
+		// If encoding fails, still return receipt (but can't cache)
+		return receipt, nil
+	}
+	// Determine finalization using latest block number
+	// Note: fetchLatestBlockNumber has its own 10-second cache, so in practice
+	// this doesn't cause excessive RPC calls. Could be optimized by passing
+	// latest block number as a parameter if caller already has it.
+	latest, err := fetchLatestBlockNumber(ctx, rpc, c)
+	if err != nil {
+		// If we can't determine, treat as non-finalized
+		c.Set(key, data, cache.TTLTxReceipt)
+		return receipt, nil
+	}
+	if latest-blockNum >= BlockFinalizationConfirmations {
+		// Finalized: store in persistent storage
+		if err := c.SetPersistent("receipts", key, data); err != nil {
+			// Log? fallback to memory cache
+			c.Set(key, data, time.Hour)
+		} else {
+			// Also keep in memory cache for faster access
+			c.Set(key, data, time.Hour)
+		}
+	} else {
+		// Non-finalized: store in memory cache with receipt TTL
+		c.Set(key, data, cache.TTLTxReceipt)
+	}
+	return receipt, nil
 }
 
 // BlocksDirNode represents the /blocks directory.
@@ -292,6 +384,344 @@ var _ fs.NodeLookuper = (*BlockNode)(nil)
 var _ fs.NodeReaddirer = (*BlockNode)(nil)
 var _ fs.NodeGetattrer = (*BlockNode)(nil)
 
+// TxsDirNode represents the txs/ subdirectory inside a block directory.
+type TxsDirNode struct {
+	fs.Inode
+	rpc      rpc.RPCClient
+	cache    *cache.Cache
+	blockNum uint64
+}
+
+var _ fs.NodeLookuper = (*TxsDirNode)(nil)
+var _ fs.NodeReaddirer = (*TxsDirNode)(nil)
+var _ fs.NodeGetattrer = (*TxsDirNode)(nil)
+
+// NewTxsDirNode creates a new TxsDirNode.
+func NewTxsDirNode(blockNum uint64, rpc rpc.RPCClient, cache *cache.Cache) *TxsDirNode {
+	return &TxsDirNode{
+		blockNum: blockNum,
+		rpc:      rpc,
+		cache:    cache,
+	}
+}
+
+// TxNode represents a transaction directory at /blocks/[number]/txs/[hash].
+type TxNode struct {
+	fs.Inode
+	rpc      rpc.RPCClient
+	cache    *cache.Cache
+	blockNum uint64
+	txHash   common.Hash
+}
+
+var _ fs.NodeLookuper = (*TxNode)(nil)
+var _ fs.NodeReaddirer = (*TxNode)(nil)
+var _ fs.NodeGetattrer = (*TxNode)(nil)
+
+// NewTxNode creates a new TxNode.
+func NewTxNode(blockNum uint64, txHash common.Hash, rpc rpc.RPCClient, cache *cache.Cache) *TxNode {
+	return &TxNode{
+		blockNum: blockNum,
+		txHash:   txHash,
+		rpc:      rpc,
+		cache:    cache,
+	}
+}
+
+// TxFileNode represents a file inside a transaction directory.
+type TxFileNode struct {
+	fs.Inode
+	rpc      rpc.RPCClient
+	cache    *cache.Cache
+	fileType string // one of fileNameInfoJSON, fileNameReceiptJSON
+	blockNum uint64
+	txHash   common.Hash
+}
+
+var _ fs.NodeReader = (*TxFileNode)(nil)
+var _ fs.NodeGetattrer = (*TxFileNode)(nil)
+
+// NewTxFileNode creates a new TxFileNode.
+func NewTxFileNode(blockNum uint64, txHash common.Hash, fileType string, rpc rpc.RPCClient, cache *cache.Cache) *TxFileNode {
+	return &TxFileNode{
+		blockNum: blockNum,
+		txHash:   txHash,
+		fileType: fileType,
+		rpc:      rpc,
+		cache:    cache,
+	}
+}
+
+// Getattr implements NodeGetattrer for TxsDirNode.
+func (tdn *TxsDirNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	out.Mode = fuse.S_IFDIR | 0o755
+	return 0
+}
+
+// Readdir implements NodeReaddirer for TxsDirNode.
+// Returns transaction hashes from the cached block object (no extra RPC call).
+func (tdn *TxsDirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	block, err := fetchBlock(ctx, tdn.blockNum, tdn.rpc, tdn.cache)
+	if err != nil {
+		if errors.Is(err, ethereum.NotFound) {
+			return nil, syscall.ENOENT
+		}
+		return nil, syscall.EIO
+	}
+	var entries []fuse.DirEntry
+	for _, tx := range block.Transactions() {
+		txHash := tx.Hash().Hex()
+		entries = append(entries, fuse.DirEntry{
+			Name: txHash,
+			Mode: fuse.S_IFDIR,
+			Ino:  hashIno("/blocks/" + strconv.FormatUint(tdn.blockNum, 10) + "/txs/" + txHash),
+		})
+	}
+	return fs.NewListDirStream(entries), 0
+}
+
+// Lookup implements NodeLookuper for TxsDirNode.
+// Returns TxNode for a transaction hash, or ENOENT if not found in the block.
+func (tdn *TxsDirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	// Validate hash format: must start with 0x and have 64 hex characters
+	if len(name) != 66 || !strings.HasPrefix(name, "0x") || common.FromHex(name) == nil {
+		// Invalid hash format per architecture error mapping
+		return nil, syscall.EINVAL
+	}
+	txHash := common.HexToHash(name)
+	// Fetch block to verify transaction exists
+	block, err := fetchBlock(ctx, tdn.blockNum, tdn.rpc, tdn.cache)
+	if err != nil {
+		if errors.Is(err, ethereum.NotFound) {
+			return nil, syscall.ENOENT
+		}
+		return nil, syscall.EIO
+	}
+	// Check if transaction exists in block
+	for _, tx := range block.Transactions() {
+		if tx.Hash() == txHash {
+			child := NewTxNode(tdn.blockNum, txHash, tdn.rpc, tdn.cache)
+			ch := tdn.NewPersistentInode(ctx, child, fs.StableAttr{
+				Ino:  hashIno("/blocks/" + strconv.FormatUint(tdn.blockNum, 10) + "/txs/" + name),
+				Mode: fuse.S_IFDIR,
+			})
+			out.Mode = fuse.S_IFDIR | 0o755
+			return ch, 0
+		}
+	}
+	return nil, syscall.ENOENT
+}
+
+// Getattr implements NodeGetattrer for TxNode.
+func (tn *TxNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	out.Mode = fuse.S_IFDIR | 0o755
+	return 0
+}
+
+// Readdir implements NodeReaddirer for TxNode.
+// Returns directory entries for the transaction directory.
+func (tn *TxNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	entries := []fuse.DirEntry{
+		{
+			Name: fileNameInfoJSON,
+			Mode: fuse.S_IFREG,
+			Ino:  hashIno("/blocks/" + strconv.FormatUint(tn.blockNum, 10) + "/txs/" + tn.txHash.Hex() + "/" + fileNameInfoJSON),
+		},
+		{
+			Name: fileNameReceiptJSON,
+			Mode: fuse.S_IFREG,
+			Ino:  hashIno("/blocks/" + strconv.FormatUint(tn.blockNum, 10) + "/txs/" + tn.txHash.Hex() + "/" + fileNameReceiptJSON),
+		},
+	}
+	return fs.NewListDirStream(entries), 0
+}
+
+// Lookup implements NodeLookuper for TxNode.
+// Returns child file nodes: info.json, receipt.json.
+func (tn *TxNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	var fileType string
+	switch name {
+	case fileNameInfoJSON:
+		fileType = fileNameInfoJSON
+	case fileNameReceiptJSON:
+		fileType = fileNameReceiptJSON
+	default:
+		return nil, syscall.ENOENT
+	}
+	child := NewTxFileNode(tn.blockNum, tn.txHash, fileType, tn.rpc, tn.cache)
+	ch := tn.NewPersistentInode(ctx, child, fs.StableAttr{
+		Ino:  hashIno("/blocks/" + strconv.FormatUint(tn.blockNum, 10) + "/txs/" + tn.txHash.Hex() + "/" + name),
+		Mode: fuse.S_IFREG,
+	})
+	out.Mode = fuse.S_IFREG | 0o644
+	out.Size = 0 // unknown size
+	return ch, 0
+}
+
+// Getattr implements NodeGetattrer for TxFileNode.
+func (tfn *TxFileNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	out.Mode = fuse.S_IFREG | 0o644
+	out.Size = 0
+	return 0
+}
+
+// Read implements NodeReader for TxFileNode.
+func (tfn *TxFileNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	content, err := tfn.fileContent(ctx)
+	if err != nil {
+		if errors.Is(err, ethereum.NotFound) {
+			return nil, syscall.ENOENT
+		}
+		return nil, syscall.EIO
+	}
+	end := int64(len(content))
+	if off >= end {
+		return fuse.ReadResultData(nil), 0
+	}
+	data := content[off:]
+	if int64(len(data)) > int64(len(dest)) {
+		data = data[:len(dest)]
+	}
+	return fuse.ReadResultData(data), 0
+}
+
+// fileContent returns the file content as bytes based on fileType.
+func (tfn *TxFileNode) fileContent(ctx context.Context) ([]byte, error) {
+	switch tfn.fileType {
+	case fileNameInfoJSON:
+		return tfn.infoJSONContent(ctx)
+	case fileNameReceiptJSON:
+		return tfn.receiptJSONContent(ctx)
+	default:
+		return nil, errors.New("unknown file type")
+	}
+}
+
+// infoJSONContent returns JSON representation of transaction info from cached block.
+func (tfn *TxFileNode) infoJSONContent(ctx context.Context) ([]byte, error) {
+	block, err := fetchBlock(ctx, tfn.blockNum, tfn.rpc, tfn.cache)
+	if err != nil {
+		return nil, err
+	}
+	// Find transaction by hash
+	var targetTx *types.Transaction
+	for _, tx := range block.Transactions() {
+		if tx.Hash() == tfn.txHash {
+			targetTx = tx
+			break
+		}
+	}
+	if targetTx == nil {
+		return nil, ethereum.NotFound
+	}
+	// Build info struct
+	info := struct {
+		Hash                 string `json:"hash"`
+		From                 string `json:"from"`
+		To                   string `json:"to"`
+		Value                string `json:"value"`
+		GasPrice             string `json:"gasPrice"`
+		MaxFeePerGas         string `json:"maxFeePerGas,omitempty"`
+		MaxPriorityFeePerGas string `json:"maxPriorityFeePerGas,omitempty"`
+		Input                string `json:"input"`
+		Gas                  uint64 `json:"gas"`
+		Nonce                uint64 `json:"nonce"`
+		BlockNumber          uint64 `json:"blockNumber"`
+		TransactionIndex     uint   `json:"transactionIndex"`
+	}{
+		Hash:        tfn.txHash.Hex(),
+		Value:       targetTx.Value().String(), // decimal string
+		Gas:         targetTx.Gas(),
+		Nonce:       targetTx.Nonce(),
+		Input:       common.Bytes2Hex(targetTx.Data()),
+		BlockNumber: tfn.blockNum,
+		// From, To, and TransactionIndex will be populated below
+		// GasPrice, MaxFeePerGas, MaxPriorityFeePerGas depend on transaction type
+	}
+	// Recover sender (from)
+	var signer types.Signer
+	if chainID := targetTx.ChainId(); chainID != nil {
+		signer = types.LatestSignerForChainID(chainID)
+	} else {
+		signer = types.HomesteadSigner{}
+	}
+	from, err := types.Sender(signer, targetTx)
+	if err != nil {
+		// Sender recovery may fail for pre-homestead transactions or malformed signatures
+		// Leave field empty rather than failing the entire request
+		info.From = ""
+	} else {
+		info.From = from.Hex()
+	}
+	// To (nil for contract creation)
+	if targetTx.To() != nil {
+		info.To = targetTx.To().Hex()
+	} else {
+		info.To = ""
+	}
+	// GasPrice depends on tx type
+	if targetTx.Type() == types.LegacyTxType {
+		info.GasPrice = targetTx.GasPrice().String()
+	} else {
+		// EIP-1559: gasPrice field not applicable, use maxFeePerGas and maxPriorityFeePerGas
+		if targetTx.GasTipCap() != nil {
+			info.MaxPriorityFeePerGas = targetTx.GasTipCap().String()
+		}
+		if targetTx.GasFeeCap() != nil {
+			info.MaxFeePerGas = targetTx.GasFeeCap().String()
+		}
+		// gasPrice is intentionally left empty for EIP-1559 transactions
+		// Effective gas price is available in receipt.json
+	}
+	// Find transaction index
+	for i, tx := range block.Transactions() {
+		if tx.Hash() == tfn.txHash {
+			info.TransactionIndex = uint(i)
+			break
+		}
+	}
+	// Marshal JSON with indentation
+	data, err := json.MarshalIndent(info, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	// Append newline for consistency
+	return append(data, '\n'), nil
+}
+
+// receiptJSONContent returns JSON representation of transaction receipt (lazy fetch).
+func (tfn *TxFileNode) receiptJSONContent(ctx context.Context) ([]byte, error) {
+	receipt, err := fetchTransactionReceipt(ctx, tfn.txHash, tfn.blockNum, tfn.rpc, tfn.cache)
+	if err != nil {
+		return nil, err
+	}
+	// Build receipt struct matching issue specification
+	//nolint:govet
+	info := struct {
+		Logs              []*types.Log `json:"logs"`
+		EffectiveGasPrice string       `json:"effectiveGasPrice"`
+		LogsBloom         string       `json:"logsBloom"`
+		ContractAddress   string       `json:"contractAddress"`
+		Status            uint64       `json:"status"`
+		GasUsed           uint64       `json:"gasUsed"`
+	}{
+		Logs:              receipt.Logs,
+		EffectiveGasPrice: receipt.EffectiveGasPrice.String(),
+		LogsBloom:         hex.EncodeToString(receipt.Bloom[:]),
+		ContractAddress:   "",
+		Status:            receipt.Status,
+		GasUsed:           receipt.GasUsed,
+	}
+	if receipt.ContractAddress != (common.Address{}) {
+		info.ContractAddress = receipt.ContractAddress.Hex()
+	}
+	data, err := json.MarshalIndent(info, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
+
 // BlockFileNode represents a file inside a block directory.
 type BlockFileNode struct {
 	fs.Inode
@@ -411,7 +841,7 @@ func NewBlockNode(blockNum uint64, rpc rpc.RPCClient, cache *cache.Cache) *Block
 }
 
 // Lookup implements NodeLookuper for BlockNode.
-// Returns child file nodes: info.json, hash, parent_hash, timestamp.
+// Returns child file nodes: info.json, hash, parent_hash, timestamp, txs directory.
 func (bn *BlockNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	var fileType string
 	switch name {
@@ -423,6 +853,15 @@ func (bn *BlockNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut
 		fileType = fileNameParentHash
 	case fileNameTimestamp:
 		fileType = fileNameTimestamp
+	case dirNameTxs:
+		// txs subdirectory
+		child := NewTxsDirNode(bn.blockNum, bn.rpc, bn.cache)
+		ch := bn.NewPersistentInode(ctx, child, fs.StableAttr{
+			Ino:  hashIno("/blocks/" + strconv.FormatUint(bn.blockNum, 10) + "/" + dirNameTxs),
+			Mode: fuse.S_IFDIR,
+		})
+		out.Mode = fuse.S_IFDIR | 0o755
+		return ch, 0
 	default:
 		// Unknown file
 		return nil, syscall.ENOENT
@@ -460,6 +899,11 @@ func (bn *BlockNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) 
 			Name: fileNameTimestamp,
 			Mode: fuse.S_IFREG,
 			Ino:  hashIno("/blocks/" + strconv.FormatUint(bn.blockNum, 10) + "/" + fileNameTimestamp),
+		},
+		{
+			Name: dirNameTxs,
+			Mode: fuse.S_IFDIR,
+			Ino:  hashIno("/blocks/" + strconv.FormatUint(bn.blockNum, 10) + "/" + dirNameTxs),
 		},
 	}
 	return fs.NewListDirStream(entries), 0

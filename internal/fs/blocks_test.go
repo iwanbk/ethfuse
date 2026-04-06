@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/trie"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
 	"github.com/iwanbk/ethfuse/internal/cache"
@@ -22,14 +23,18 @@ import (
 
 // mockBlockRPCClient is a mock RPCClient that returns predefined blocks.
 type mockBlockRPCClient struct {
-	blocks map[uint64]*types.Block
+	blocks       map[uint64]*types.Block
+	receipts     map[common.Hash]*types.Receipt
+	transactions map[common.Hash]*types.Transaction
 }
 
 var _ rpc.RPCClient = (*mockBlockRPCClient)(nil)
 
 func newMockBlockRPCClient() *mockBlockRPCClient {
 	return &mockBlockRPCClient{
-		blocks: make(map[uint64]*types.Block),
+		blocks:       make(map[uint64]*types.Block),
+		receipts:     make(map[common.Hash]*types.Receipt),
+		transactions: make(map[common.Hash]*types.Transaction),
 	}
 }
 
@@ -59,10 +64,18 @@ func (m *mockBlockRPCClient) BlockByNumber(ctx context.Context, n *big.Int) (*ty
 
 // Other methods not needed for block tests, but must satisfy interface.
 func (m *mockBlockRPCClient) TransactionByHash(ctx context.Context, hash common.Hash) (*types.Transaction, error) {
-	return nil, nil
+	tx, ok := m.transactions[hash]
+	if !ok {
+		return nil, ethereum.NotFound
+	}
+	return tx, nil
 }
 func (m *mockBlockRPCClient) TransactionReceipt(ctx context.Context, hash common.Hash) (*types.Receipt, error) {
-	return nil, nil
+	receipt, ok := m.receipts[hash]
+	if !ok {
+		return nil, ethereum.NotFound
+	}
+	return receipt, nil
 }
 func (m *mockBlockRPCClient) BalanceAt(ctx context.Context, addr common.Address, block *big.Int) (*big.Int, error) {
 	return big.NewInt(0), nil
@@ -97,6 +110,30 @@ func (m *mockBlockRPCClient) addMockBlock(number uint64, parentHash common.Hash,
 	}
 	block := types.NewBlockWithHeader(header)
 	m.blocks[number] = block
+}
+
+// addMockBlockWithTransaction adds a mock block containing a transaction and its receipt.
+func (m *mockBlockRPCClient) addMockBlockWithTransaction(number uint64, parentHash common.Hash, timestamp uint64, tx *types.Transaction, receipt *types.Receipt) {
+	header := &types.Header{
+		Number:     big.NewInt(int64(number)),
+		ParentHash: parentHash,
+		Time:       timestamp,
+		GasLimit:   30_000_000,
+		GasUsed:    15_000_000,
+		Difficulty: big.NewInt(0),
+		Coinbase:   common.HexToAddress("0x0000000000000000000000000000000000000000"),
+		BaseFee:    big.NewInt(1000000000),
+	}
+	// Create block with transaction
+	body := &types.Body{
+		Transactions: []*types.Transaction{tx},
+		Uncles:       nil,
+	}
+	block := types.NewBlock(header, body, []*types.Receipt{receipt}, trie.NewStackTrie(nil))
+	m.blocks[number] = block
+	// Store transaction and receipt
+	m.transactions[tx.Hash()] = tx
+	m.receipts[tx.Hash()] = receipt
 }
 
 func TestRecentDirNode_Readdir(t *testing.T) {
@@ -349,4 +386,116 @@ func TestGhostAccess(t *testing.T) {
 	// This tests that Lookup works for any block number
 	// Skip: Requires mounted FUSE bridge to test Lookup with kernel interface
 	t.Skip("Requires mounted bridge")
+}
+
+func TestTxsDirNode_Readdir(t *testing.T) {
+	ctx := context.Background()
+	mockRPC := newMockBlockRPCClient()
+	cache := newTestCache(t)
+
+	// Create a mock transaction
+	tx := types.NewTransaction(
+		0, // nonce
+		common.HexToAddress("0x1111111111111111111111111111111111111111"),
+		big.NewInt(1000000000000000000), // 1 ETH
+		21000,                           // gas limit
+		big.NewInt(1000000000),          // gas price
+		[]byte{},                        // data
+	)
+
+	// Create a mock receipt
+	receipt := &types.Receipt{
+		Status:            1,
+		GasUsed:           21000,
+		EffectiveGasPrice: big.NewInt(1000000000),
+		ContractAddress:   common.Address{},
+		Logs:              []*types.Log{},
+		Bloom:             types.Bloom{},
+	}
+
+	// Add block with transaction
+	var parentHash common.Hash = common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000000")
+	mockRPC.addMockBlockWithTransaction(1000, parentHash, 123456, tx, receipt)
+
+	// Create TxsDirNode
+	node := NewTxsDirNode(1000, mockRPC, cache)
+
+	// Test Readdir
+	stream, errno := node.Readdir(ctx)
+	if errno != 0 {
+		t.Fatalf("Readdir errno = %v, want 0", errno)
+	}
+	var entries []fuse.DirEntry
+	for stream.HasNext() {
+		entry, errno := stream.Next()
+		if errno != 0 {
+			t.Fatalf("Next errno = %v", errno)
+		}
+		entries = append(entries, entry)
+	}
+
+	// Should have exactly one entry (our transaction)
+	if len(entries) != 1 {
+		t.Errorf("got %d entries, want 1", len(entries))
+	}
+	// Entry should be the transaction hash
+	expectedHash := tx.Hash().Hex()
+	if entries[0].Name != expectedHash {
+		t.Errorf("entry name = %s, want %s", entries[0].Name, expectedHash)
+	}
+	if entries[0].Mode&syscall.S_IFDIR == 0 {
+		t.Errorf("entry mode = %o, should be directory", entries[0].Mode)
+	}
+}
+
+func TestTxsDirNode_Lookup(t *testing.T) {
+	ctx := context.Background()
+	mockRPC := newMockBlockRPCClient()
+	cache := newTestCache(t)
+
+	// Create a mock transaction
+	tx := types.NewTransaction(
+		0, // nonce
+		common.HexToAddress("0x1111111111111111111111111111111111111111"),
+		big.NewInt(1000000000000000000), // 1 ETH
+		21000,                           // gas limit
+		big.NewInt(1000000000),          // gas price
+		[]byte{},                        // data
+	)
+
+	// Create a mock receipt
+	receipt := &types.Receipt{
+		Status:            1,
+		GasUsed:           21000,
+		EffectiveGasPrice: big.NewInt(1000000000),
+		ContractAddress:   common.Address{},
+		Logs:              []*types.Log{},
+		Bloom:             types.Bloom{},
+	}
+
+	// Add block with transaction
+	var parentHash common.Hash = common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000000000")
+	mockRPC.addMockBlockWithTransaction(1000, parentHash, 123456, tx, receipt)
+
+	// Create TxsDirNode
+	node := NewTxsDirNode(1000, mockRPC, cache)
+
+	// Positive Lookup test requires mounted FUSE bridge (skip)
+	// The logic is tested via integration tests
+	t.Run("ValidationErrors", func(t *testing.T) {
+		// Test Lookup with invalid hash format (should return EINVAL)
+		out2 := &fuse.EntryOut{}
+		_, errno2 := node.Lookup(ctx, "invalidhash", out2)
+		if errno2 != syscall.EINVAL {
+			t.Errorf("Lookup invalid hash errno = %v, want EINVAL", errno2)
+		}
+
+		// Test Lookup with non-existent hash (should return ENOENT)
+		nonExistentHash := "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+		out3 := &fuse.EntryOut{}
+		_, errno3 := node.Lookup(ctx, nonExistentHash, out3)
+		if errno3 != syscall.ENOENT {
+			t.Errorf("Lookup non-existent hash errno = %v, want ENOENT", errno3)
+		}
+	})
 }

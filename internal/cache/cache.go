@@ -3,6 +3,7 @@ package cache
 import (
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/jellydator/ttlcache/v3"
@@ -16,14 +17,24 @@ const (
 	TTLChainGas         = 5 * time.Second
 	TTLAccount          = 30 * time.Second
 	TTLNegative         = 30 * time.Second
-	TTLENS              = 300 * time.Second
+	TTLENS              = 300 * time.Second // 5 minutes
+)
+
+// Common errors returned by the cache.
+var (
+	ErrBucketNotFound    = errors.New("bucket not found")
+	ErrKeyNotFound       = errors.New("key not found")
+	ErrPersistentStorage = errors.New("persistent storage not enabled")
+	ErrCacheClosed       = errors.New("cache is closed")
+	ErrInvalidInput      = errors.New("invalid input")
 )
 
 // Cache implements a two-tier caching layer with ttlcache for volatile data
 // and bbolt for finalized/immutable data that survives restarts.
 type Cache struct {
-	mem *ttlcache.Cache[string, []byte]
-	db  *bbolt.DB
+	mem    *ttlcache.Cache[string, []byte]
+	db     *bbolt.DB
+	closed atomic.Bool
 }
 
 // NewCache creates a new Cache instance.
@@ -50,11 +61,16 @@ func NewCache(dbPath string) (*Cache, error) {
 		c.db = db
 	}
 
+	c.closed.Store(false)
 	return c, nil
 }
 
 // Close releases resources used by the cache.
 func (c *Cache) Close() error {
+	if c.closed.Load() {
+		return nil // Already closed
+	}
+	c.closed.Store(true)
 	c.mem.Stop()
 	if c.db != nil {
 		return c.db.Close()
@@ -64,6 +80,9 @@ func (c *Cache) Close() error {
 
 // Get retrieves a value from the memory cache.
 func (c *Cache) Get(key string) ([]byte, bool) {
+	if c.closed.Load() {
+		return nil, false
+	}
 	item := c.mem.Get(key)
 	if item == nil {
 		return nil, false
@@ -73,40 +92,57 @@ func (c *Cache) Get(key string) ([]byte, bool) {
 
 // Set stores a value in the memory cache with the given TTL.
 func (c *Cache) Set(key string, val []byte, ttl time.Duration) {
+	if c.closed.Load() {
+		return
+	}
 	c.mem.Set(key, val, ttl)
 }
 
 // GetPersistent retrieves a value from the persistent storage.
 // bucket is the bbolt bucket name, key is the key within that bucket.
-func (c *Cache) GetPersistent(bucket, key string) ([]byte, bool) {
+// Returns ErrBucketNotFound, ErrKeyNotFound for not found cases,
+// or other errors for database issues.
+func (c *Cache) GetPersistent(bucket, key string) ([]byte, error) {
+	if c.closed.Load() {
+		return nil, ErrCacheClosed
+	}
 	if c.db == nil {
-		return nil, false
+		return nil, ErrPersistentStorage
+	}
+	if bucket == "" || key == "" {
+		return nil, ErrInvalidInput
 	}
 
 	var value []byte
 	err := c.db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(bucket))
 		if b == nil {
-			return errors.New("bucket not found")
+			return ErrBucketNotFound
 		}
 		v := b.Get([]byte(key))
 		if v == nil {
-			return errors.New("key not found")
+			return ErrKeyNotFound
 		}
 		value = make([]byte, len(v))
 		copy(value, v)
 		return nil
 	})
 	if err != nil {
-		return nil, false
+		return nil, err
 	}
-	return value, true
+	return value, nil
 }
 
 // SetPersistent stores a value in the persistent storage.
 func (c *Cache) SetPersistent(bucket, key string, val []byte) error {
+	if c.closed.Load() {
+		return ErrCacheClosed
+	}
 	if c.db == nil {
-		return errors.New("persistent storage not enabled")
+		return ErrPersistentStorage
+	}
+	if bucket == "" || key == "" {
+		return ErrInvalidInput
 	}
 
 	return c.db.Update(func(tx *bbolt.Tx) error {
@@ -120,11 +156,17 @@ func (c *Cache) SetPersistent(bucket, key string, val []byte) error {
 
 // SetNegative marks a path as invalid (negative caching) with TTLNegative.
 func (c *Cache) SetNegative(path string) {
+	if c.closed.Load() {
+		return
+	}
 	c.Set("negative:"+path, []byte{1}, TTLNegative)
 }
 
 // IsNegative checks if a path is marked as invalid.
 func (c *Cache) IsNegative(path string) bool {
+	if c.closed.Load() {
+		return false
+	}
 	_, ok := c.Get("negative:" + path)
 	return ok
 }

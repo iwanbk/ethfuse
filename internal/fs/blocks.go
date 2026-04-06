@@ -1,7 +1,6 @@
 package fs
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -36,6 +35,9 @@ const (
 	fileNameHash        = "hash"
 	fileNameParentHash  = "parent_hash"
 	fileNameTimestamp   = "timestamp"
+	// BlockFinalizationConfirmations is the number of confirmations required for a block to be considered finalized.
+	// Finalized blocks are stored in persistent storage (bbolt), non-finalized blocks use TTL-based memory cache.
+	BlockFinalizationConfirmations = 12
 )
 
 // encodeBlock serializes a block to bytes using RLP.
@@ -117,7 +119,7 @@ func fetchBlock(ctx context.Context, blockNum uint64, rpc rpc.RPCClient, c *cach
 		c.Set(key, data, cache.TTLBlockLatest)
 		return block, nil
 	}
-	if latest-blockNum >= 12 {
+	if latest-blockNum >= BlockFinalizationConfirmations {
 		// Finalized: store in persistent storage
 		if err := c.SetPersistent("blocks", key, data); err != nil {
 			// Log? fallback to memory cache
@@ -196,7 +198,8 @@ func (r *RecentDirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errn
 		entries = append(entries, fuse.DirEntry{
 			Name: name,
 			Mode: fuse.S_IFDIR,
-			Ino:  hashIno("/blocks/" + name),
+			// Use /blocks/[number] as path for consistent inode across access methods
+			Ino: hashIno("/blocks/" + name),
 		})
 	}
 	return fs.NewListDirStream(entries), 0
@@ -219,6 +222,8 @@ func (r *RecentDirNode) Lookup(ctx context.Context, name string, out *fuse.Entry
 	}
 	child := NewBlockNode(blockNum, r.rpc, r.cache)
 	ch := r.NewPersistentInode(ctx, child, fs.StableAttr{
+		// Use /blocks/[number] as path for consistent inode across access methods
+		// (both /blocks/[number] and /blocks/recent/[number] refer to same block directory)
 		Ino:  hashIno("/blocks/" + name),
 		Mode: fuse.S_IFDIR,
 	})
@@ -330,10 +335,6 @@ func (bfn *BlockFileNode) Read(ctx context.Context, f fs.FileHandle, dest []byte
 	content, err := bfn.fileContent(block)
 	if err != nil {
 		return nil, syscall.EIO
-	}
-	// Ensure newline at end
-	if !bytes.HasSuffix(content, []byte{'\n'}) {
-		content = append(content, '\n')
 	}
 	end := int64(len(content))
 	if off >= end {

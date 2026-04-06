@@ -109,9 +109,23 @@ func TestRootNode_Readdir(t *testing.T) {
 		t.Fatal("Readdir() stream = nil, want non-nil")
 	}
 
-	// Stream should be empty
-	if stream.HasNext() {
-		t.Error("Readdir() stream.HasNext() = true, want false (empty directory)")
+	// Expect exactly one entry: "blocks"
+	var entries []fuse.DirEntry
+	for stream.HasNext() {
+		entry, errno := stream.Next()
+		if errno != 0 {
+			t.Fatalf("Next() errno = %v", errno)
+		}
+		entries = append(entries, entry)
+	}
+	if len(entries) != 1 {
+		t.Errorf("Readdir() returned %d entries, want 1", len(entries))
+	}
+	if len(entries) > 0 && entries[0].Name != "blocks" {
+		t.Errorf("Readdir() entry name = %q, want \"blocks\"", entries[0].Name)
+	}
+	if len(entries) > 0 && entries[0].Mode&syscall.S_IFDIR == 0 {
+		t.Errorf("Readdir() entry mode = %o, should be a directory", entries[0].Mode)
 	}
 
 	stream.Close()

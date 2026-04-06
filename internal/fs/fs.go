@@ -6,24 +6,18 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+
+	"github.com/iwanbk/ethfuse/internal/cache"
+	"github.com/iwanbk/ethfuse/internal/rpc"
 )
 
 // RootNode is the root directory of the ethfuse filesystem.
 // It's an empty directory for now (skeleton implementation).
+// Future nodes (BlocksDirNode, AccountsDirNode, etc.) will be attached here.
 type RootNode struct {
 	fs.Inode
-	rpc   RPCClient
-	cache Cacher
-}
-
-// RPCClient defines the interface for RPC operations.
-type RPCClient interface {
-	Close()
-}
-
-// Cacher defines the interface for cache operations.
-type Cacher interface {
-	Close() error
+	rpc   rpc.RPCClient
+	cache *cache.Cache
 }
 
 var _ fs.NodeOpener = (*RootNode)(nil)
@@ -34,7 +28,7 @@ var _ fs.NodeListxattrer = (*RootNode)(nil)
 var _ fs.NodeSetxattrer = (*RootNode)(nil)
 
 // NewRootNode creates a new RootNode.
-func NewRootNode(rpc RPCClient, cache Cacher) *RootNode {
+func NewRootNode(rpc rpc.RPCClient, cache *cache.Cache) *RootNode {
 	return &RootNode{
 		rpc:   rpc,
 		cache: cache,

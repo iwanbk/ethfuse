@@ -2,28 +2,84 @@ package fs
 
 import (
 	"context"
+	"math/big"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+
+	"github.com/iwanbk/ethfuse/internal/cache"
+	"github.com/iwanbk/ethfuse/internal/rpc"
 )
 
 // mockRPCClient is a mock implementation of RPCClient for testing.
 type mockRPCClient struct{}
 
+var _ rpc.RPCClient = (*mockRPCClient)(nil)
+
 func (m *mockRPCClient) Close() {}
 
-// mockCacher is a mock implementation of Cacher for testing.
-type mockCacher struct{}
+func (m *mockRPCClient) BlockByNumber(ctx context.Context, n *big.Int) (*types.Block, error) {
+	return nil, nil
+}
 
-func (m *mockCacher) Close() error { return nil }
+func (m *mockRPCClient) TransactionByHash(ctx context.Context, hash common.Hash) (*types.Transaction, error) {
+	return nil, nil
+}
+
+func (m *mockRPCClient) TransactionReceipt(ctx context.Context, hash common.Hash) (*types.Receipt, error) {
+	return nil, nil
+}
+
+func (m *mockRPCClient) BalanceAt(ctx context.Context, addr common.Address, block *big.Int) (*big.Int, error) {
+	return big.NewInt(0), nil
+}
+
+func (m *mockRPCClient) NonceAt(ctx context.Context, addr common.Address, block *big.Int) (uint64, error) {
+	return 0, nil
+}
+
+func (m *mockRPCClient) CodeAt(ctx context.Context, addr common.Address, block *big.Int) ([]byte, error) {
+	return nil, nil
+}
+
+func (m *mockRPCClient) ChainID(ctx context.Context) (*big.Int, error) {
+	return big.NewInt(1), nil
+}
+
+func (m *mockRPCClient) FeeHistory(ctx context.Context, blockCount uint64, lastBlock *big.Int, rewardPercentiles []float64) (*ethereum.FeeHistory, error) {
+	return nil, nil
+}
+
+func (m *mockRPCClient) CallContract(ctx context.Context, call ethereum.CallMsg, block *big.Int) ([]byte, error) {
+	return nil, nil
+}
+
+// newTestCache creates a cache with empty db path (memory only) for testing.
+func newTestCache(t *testing.T) *cache.Cache {
+	t.Helper()
+	c, err := cache.NewCache("")
+	if err != nil {
+		t.Fatalf("failed to create test cache: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := c.Close(); err != nil {
+			t.Logf("failed to close test cache: %v", err)
+		}
+	})
+	return c
+}
 
 func TestRootNode_Getattr(t *testing.T) {
-	root := NewRootNode(&mockRPCClient{}, &mockCacher{})
+	root := NewRootNode(&mockRPCClient{}, newTestCache(t))
 
 	var out fuse.AttrOut
 	errno := root.Getattr(context.TODO(), nil, &out)
@@ -42,7 +98,7 @@ func TestRootNode_Getattr(t *testing.T) {
 }
 
 func TestRootNode_Readdir(t *testing.T) {
-	root := NewRootNode(&mockRPCClient{}, &mockCacher{})
+	root := NewRootNode(&mockRPCClient{}, newTestCache(t))
 
 	stream, errno := root.Readdir(context.TODO())
 	if errno != 0 {
@@ -62,7 +118,7 @@ func TestRootNode_Readdir(t *testing.T) {
 }
 
 func TestRootNode_Open(t *testing.T) {
-	root := NewRootNode(&mockRPCClient{}, &mockCacher{})
+	root := NewRootNode(&mockRPCClient{}, newTestCache(t))
 
 	fh, fuseFlags, errno := root.Open(context.TODO(), 0)
 	if errno != syscall.EISDIR {
@@ -77,7 +133,7 @@ func TestRootNode_Open(t *testing.T) {
 }
 
 func TestRootNode_Getxattr(t *testing.T) {
-	root := NewRootNode(&mockRPCClient{}, &mockCacher{})
+	root := NewRootNode(&mockRPCClient{}, newTestCache(t))
 
 	size, errno := root.Getxattr(context.TODO(), "user.test", nil)
 	if errno != syscall.ENODATA {
@@ -89,7 +145,7 @@ func TestRootNode_Getxattr(t *testing.T) {
 }
 
 func TestRootNode_Listxattr(t *testing.T) {
-	root := NewRootNode(&mockRPCClient{}, &mockCacher{})
+	root := NewRootNode(&mockRPCClient{}, newTestCache(t))
 
 	size, errno := root.Listxattr(context.TODO(), nil)
 	if errno != syscall.ENODATA {
@@ -101,7 +157,7 @@ func TestRootNode_Listxattr(t *testing.T) {
 }
 
 func TestRootNode_Setxattr(t *testing.T) {
-	root := NewRootNode(&mockRPCClient{}, &mockCacher{})
+	root := NewRootNode(&mockRPCClient{}, newTestCache(t))
 
 	errno := root.Setxattr(context.TODO(), "user.test", []byte("data"), 0)
 	if errno != syscall.EROFS {
@@ -111,6 +167,9 @@ func TestRootNode_Setxattr(t *testing.T) {
 
 // TestMountUnmount tests that mounting and immediately unmounting does not crash.
 func TestMountUnmount(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("FUSE mount test requires Linux")
+	}
 	// Create a temporary directory for the mount point
 	tmpDir := t.TempDir()
 	mountpoint := filepath.Join(tmpDir, "mnt")
@@ -118,7 +177,7 @@ func TestMountUnmount(t *testing.T) {
 		t.Fatalf("Failed to create mount point: %v", err)
 	}
 
-	root := NewRootNode(&mockRPCClient{}, &mockCacher{})
+	root := NewRootNode(&mockRPCClient{}, newTestCache(t))
 
 	opts := &fs.Options{
 		MountOptions: fuse.MountOptions{

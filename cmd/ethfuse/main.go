@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -47,8 +48,20 @@ func main() {
 	defer client.Close()
 
 	// Create cache
-	// TODO: configure cache DB path
-	cache, err := cache.NewCache("")
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		cacheDir = "" // fallback to in-memory only
+	}
+	var cacheDBPath string
+	if cacheDir != "" {
+		cacheDBPath = filepath.Join(cacheDir, "ethfuse", "cache.db")
+		// Ensure directory exists
+		if mkdirErr := os.MkdirAll(filepath.Dir(cacheDBPath), 0o755); mkdirErr != nil {
+			log.Printf("Warning: failed to create cache directory, using in-memory only: %v", mkdirErr)
+			cacheDBPath = ""
+		}
+	}
+	cache, err := cache.NewCache(cacheDBPath)
 	if err != nil {
 		log.Fatalf("Failed to create cache: %v", err)
 	}

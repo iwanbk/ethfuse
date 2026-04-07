@@ -38,7 +38,8 @@ func NewRootNode(rpc rpc.RPCClient, cache *cache.Cache) *RootNode {
 
 // Lookup implements NodeLookuper.
 func (r *RootNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	if name == "blocks" {
+	switch name {
+	case "blocks":
 		child := NewBlocksDirNode(r.rpc, r.cache)
 		ch := r.NewPersistentInode(ctx, child, fs.StableAttr{
 			Ino:  hashIno("/blocks"),
@@ -46,8 +47,16 @@ func (r *RootNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 		})
 		out.Mode = fuse.S_IFDIR | 0o755
 		return ch, 0
+	case "txs":
+		child := NewRootTxsDirNode(r.rpc, r.cache)
+		ch := r.NewPersistentInode(ctx, child, fs.StableAttr{
+			Ino:  hashIno("/txs"),
+			Mode: fuse.S_IFDIR,
+		})
+		out.Mode = fuse.S_IFDIR | 0o755
+		return ch, 0
 	}
-	// Other directories (txs, accounts, chain, ens) will be added later
+	// Other directories (accounts, chain, ens) will be added later
 	return nil, syscall.ENOENT
 }
 
@@ -57,13 +66,18 @@ func (r *RootNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fu
 }
 
 // Readdir handles FUSE_READDIR requests.
-// Returns directory entries for root: blocks.
+// Returns directory entries for root: blocks, txs.
 func (r *RootNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	entries := []fuse.DirEntry{
 		{
 			Name: "blocks",
 			Mode: fuse.S_IFDIR,
 			Ino:  hashIno("/blocks"),
+		},
+		{
+			Name: "txs",
+			Mode: fuse.S_IFDIR,
+			Ino:  hashIno("/txs"),
 		},
 	}
 	return fs.NewListDirStream(entries), 0

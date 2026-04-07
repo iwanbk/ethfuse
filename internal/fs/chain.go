@@ -6,7 +6,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -31,10 +30,6 @@ type ChainNode struct {
 	fs.Inode
 	rpc   rpc.RPCClient
 	cache *cache.Cache
-	// static fields fetched once at startup
-	chainID   string
-	chainName string
-	mu        sync.RWMutex
 }
 
 var _ fs.NodeReaddirer = (*ChainNode)(nil)
@@ -47,21 +42,22 @@ func NewChainNode(rpc rpc.RPCClient, c *cache.Cache) *ChainNode {
 		rpc:   rpc,
 		cache: c,
 	}
-	// Fetch static data at startup
+	// Fetch static data at startup and cache it
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Fetch chain ID
+	// Fetch chain ID and cache with long TTL (changes rarely)
 	if id, err := rpc.ChainID(ctx); err == nil {
-		n.chainID = id.String()
-		// Cache statically (no TTL expiry, but store in cache for consistency)
-		c.Set(cacheKeyChainID, []byte(n.chainID), 24*time.Hour)
+		c.Set(cacheKeyChainID, []byte(id.String()), 24*time.Hour)
 	}
 
-	// Fetch chain name via net_version (eth_chainId doesn't give name)
-	// We'll use a simple mapping based on chain ID for common chains
-	n.chainName = chainNameFromID(n.chainID)
-	c.Set(cacheKeyChainName, []byte(n.chainName), 24*time.Hour)
+	// Fetch chain name from chain ID mapping and cache
+	chainID := ""
+	if id, err := rpc.ChainID(ctx); err == nil {
+		chainID = id.String()
+	}
+	chainName := chainNameFromID(chainID)
+	c.Set(cacheKeyChainName, []byte(chainName), 24*time.Hour)
 
 	return n
 }
@@ -110,15 +106,31 @@ func (n *ChainNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 	switch name {
 	case "id":
 		return n.newFileInode(ctx, "id", fuse.S_IFREG, func() ([]byte, error) {
-			n.mu.RLock()
-			defer n.mu.RUnlock()
-			return []byte(n.chainID + "\n"), nil
+			if data, ok := n.cache.Get(cacheKeyChainID); ok {
+				return append(data, '\n'), nil
+			}
+			// Fallback: fetch from RPC if cache miss
+			if id, err := n.rpc.ChainID(ctx); err == nil {
+				data := []byte(id.String() + "\n")
+				n.cache.Set(cacheKeyChainID, data[:len(data)-1], 24*time.Hour)
+				return data, nil
+			}
+			return []byte("\n"), nil
 		}), 0
 	case "name":
 		return n.newFileInode(ctx, "name", fuse.S_IFREG, func() ([]byte, error) {
-			n.mu.RLock()
-			defer n.mu.RUnlock()
-			return []byte(n.chainName + "\n"), nil
+			if data, ok := n.cache.Get(cacheKeyChainName); ok {
+				return append(data, '\n'), nil
+			}
+			// Fallback: derive from chain ID if cache miss
+			chainID := ""
+			if id, err := n.rpc.ChainID(ctx); err == nil {
+				chainID = id.String()
+			}
+			chainName := chainNameFromID(chainID)
+			data := []byte(chainName + "\n")
+			n.cache.Set(cacheKeyChainName, data[:len(data)-1], 24*time.Hour)
+			return data, nil
 		}), 0
 	case "latest_block":
 		return n.newFileInode(ctx, "latest_block", fuse.S_IFREG, func() ([]byte, error) {
@@ -152,11 +164,10 @@ func (n *ChainNode) newFileInode(ctx context.Context, name string, mode uint32, 
 }
 
 // chainFileNode is a simple file node that reads from a function.
+// It holds no state - all caching is done by the centralized cache layer.
 type chainFileNode struct {
 	fs.Inode
 	readFn func() ([]byte, error)
-	data   []byte
-	mu     sync.Mutex
 }
 
 var _ fs.NodeOpener = (*chainFileNode)(nil)
@@ -175,23 +186,17 @@ func (n *chainFileNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.
 }
 
 // Read implements fs.NodeReader.
+// Calls readFn on every read - caching is handled by the centralized cache layer.
 func (n *chainFileNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-
-	// Lazy load data
-	if n.data == nil {
-		data, err := n.readFn()
-		if err != nil {
-			return nil, errnoFromErr(err)
-		}
-		n.data = data
+	data, err := n.readFn()
+	if err != nil {
+		return nil, errnoFromErr(err)
 	}
 
-	if off >= int64(len(n.data)) {
+	if off >= int64(len(data)) {
 		return fuse.ReadResultData(nil), 0
 	}
-	return fuse.ReadResultData(n.data[off:]), 0
+	return fuse.ReadResultData(data[off:]), 0
 }
 
 // GasDirNode represents the /chain/gas directory.
@@ -370,16 +375,20 @@ func errnoFromErr(err error) syscall.Errno {
 }
 
 // startBackgroundRefresh starts a background goroutine to refresh latest_block.
-// This should be called once at startup.
-func startBackgroundRefresh(c *cache.Cache, rpc rpc.RPCClient, interval time.Duration) {
+// The goroutine stops when the context is cancelled (e.g., on shutdown).
+func startBackgroundRefresh(ctx context.Context, c *cache.Cache, rpc rpc.RPCClient, interval time.Duration) {
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
-		ctx := context.Background()
-		for range ticker.C {
-			// Fetch and cache latest block number
-			_, _ = fetchLatestBlockNumberWithTTL(ctx, rpc, c, interval)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				// Fetch and cache latest block number
+				_, _ = fetchLatestBlockNumberWithTTL(ctx, rpc, c, interval)
+			}
 		}
 	}()
 }

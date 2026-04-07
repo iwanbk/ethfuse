@@ -37,10 +37,11 @@ func NewRootNode(rpc rpc.RPCClient, cache *cache.Cache) *RootNode {
 }
 
 // StartBackgroundRefresh starts background goroutines for refreshing volatile data.
+// The goroutines stop when the context is cancelled (e.g., on shutdown).
 // This should be called once at startup after creating the RootNode.
-func StartBackgroundRefresh(rpc rpc.RPCClient, c *cache.Cache) {
+func StartBackgroundRefresh(ctx context.Context, rpc rpc.RPCClient, c *cache.Cache) {
 	// Start background refresh for latest_block (10s interval)
-	startBackgroundRefresh(c, rpc, cache.TTLChainLatestBlock)
+	startBackgroundRefresh(ctx, c, rpc, cache.TTLChainLatestBlock)
 }
 
 // Lookup implements NodeLookuper.

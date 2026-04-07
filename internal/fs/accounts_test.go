@@ -20,15 +20,13 @@ import (
 
 // mockAccountRPCClient is a mock RPCClient that returns predefined account data.
 type mockAccountRPCClient struct {
-	balances map[common.Address]*big.Int
-	nonces   map[common.Address]uint64
-	codes    map[common.Address][]byte
-	mu       sync.RWMutex
-
-	// track calls for assertions
+	balances     map[common.Address]*big.Int
+	nonces       map[common.Address]uint64
+	codes        map[common.Address][]byte
 	balanceCalls map[common.Address]int
 	nonceCalls   map[common.Address]int
 	codeCalls    map[common.Address]int
+	mu           sync.RWMutex
 }
 
 var _ rpc.RPCClient = (*mockAccountRPCClient)(nil)

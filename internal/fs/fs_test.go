@@ -109,7 +109,7 @@ func TestRootNode_Readdir(t *testing.T) {
 		t.Fatal("Readdir() stream = nil, want non-nil")
 	}
 
-	// Expect exactly one entry: "blocks"
+	// Expect exactly two entries: "blocks", "txs"
 	var entries []fuse.DirEntry
 	for stream.HasNext() {
 		entry, errno := stream.Next()
@@ -118,14 +118,28 @@ func TestRootNode_Readdir(t *testing.T) {
 		}
 		entries = append(entries, entry)
 	}
-	if len(entries) != 1 {
-		t.Errorf("Readdir() returned %d entries, want 1", len(entries))
+	if len(entries) != 2 {
+		t.Errorf("Readdir() returned %d entries, want 2", len(entries))
 	}
-	if len(entries) > 0 && entries[0].Name != "blocks" {
-		t.Errorf("Readdir() entry name = %q, want \"blocks\"", entries[0].Name)
+	// Check both entries are directories and have expected names
+	expectedNames := map[string]bool{
+		"blocks": false,
+		"txs":    false,
 	}
-	if len(entries) > 0 && entries[0].Mode&syscall.S_IFDIR == 0 {
-		t.Errorf("Readdir() entry mode = %o, should be a directory", entries[0].Mode)
+	for _, entry := range entries {
+		if _, ok := expectedNames[entry.Name]; !ok {
+			t.Errorf("Readdir() unexpected entry name %q", entry.Name)
+		} else {
+			expectedNames[entry.Name] = true
+		}
+		if entry.Mode&syscall.S_IFDIR == 0 {
+			t.Errorf("Readdir() entry %q mode = %o, should be a directory", entry.Name, entry.Mode)
+		}
+	}
+	for name, found := range expectedNames {
+		if !found {
+			t.Errorf("Readdir() missing entry %q", name)
+		}
 	}
 
 	stream.Close()

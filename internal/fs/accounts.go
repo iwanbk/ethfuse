@@ -188,7 +188,6 @@ func (afn *AccountFileNode) Read(ctx context.Context, f fs.FileHandle, dest []by
 		if errors.Is(err, ethereum.NotFound) {
 			return nil, syscall.ENOENT
 		}
-		// TODO: map other errors appropriately (rate limit -> EAGAIN, network -> EIO)
 		return nil, syscall.EIO
 	}
 	end := int64(len(content))

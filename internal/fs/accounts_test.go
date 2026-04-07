@@ -14,7 +14,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
-	"github.com/iwanbk/ethfuse/internal/cache"
 	"github.com/iwanbk/ethfuse/internal/rpc"
 )
 
@@ -123,11 +122,7 @@ func (m *mockAccountRPCClient) setCode(addr common.Address, code []byte) {
 
 func TestAccountsDirNode_Lookup_InvalidAddress(t *testing.T) {
 	mockRPC := newMockAccountRPCClient()
-	c, err := cache.NewCache("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
+	c := newTestCache(t)
 
 	node := NewAccountsDirNode(mockRPC, c)
 	ctx := context.Background()
@@ -142,11 +137,7 @@ func TestAccountsDirNode_Lookup_InvalidAddress(t *testing.T) {
 
 func TestAccountNode_EOA(t *testing.T) {
 	mockRPC := newMockAccountRPCClient()
-	c, err := cache.NewCache("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
+	c := newTestCache(t)
 
 	addr := common.HexToAddress("0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045")
 	balance := big.NewInt(1234567890123456789) // 1.234567890123456789 ETH
@@ -201,11 +192,7 @@ func TestAccountNode_EOA(t *testing.T) {
 
 func TestAccountNode_Contract(t *testing.T) {
 	mockRPC := newMockAccountRPCClient()
-	c, err := cache.NewCache("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
+	c := newTestCache(t)
 
 	addr := common.HexToAddress("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
 	balance := big.NewInt(1000000)
@@ -231,11 +218,8 @@ func TestAccountNode_Contract(t *testing.T) {
 
 func TestAccountNode_Cache(t *testing.T) {
 	mockRPC := newMockAccountRPCClient()
-	c, err := cache.NewCache("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
+	c := newTestCache(t)
+	var err error
 
 	addr := common.HexToAddress("0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045")
 	balance := big.NewInt(1000000)

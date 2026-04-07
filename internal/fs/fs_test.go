@@ -109,23 +109,24 @@ func TestRootNode_Readdir(t *testing.T) {
 		t.Fatal("Readdir() stream = nil, want non-nil")
 	}
 
-	// Expect exactly three entries: "blocks", "txs", "accounts"
+	// Expect exactly four entries: "blocks", "txs", "accounts", "chain"
 	var entries []fuse.DirEntry
 	for stream.HasNext() {
 		entry, errno := stream.Next()
 		if errno != 0 {
-			t.Fatalf("Next() errno = %v", errno)
+			t.Fatalf("Next errno = %v", errno)
 		}
 		entries = append(entries, entry)
 	}
-	if len(entries) != 3 {
-		t.Errorf("Readdir() returned %d entries, want 3", len(entries))
+	if len(entries) != 4 {
+		t.Errorf("Readdir() returned %d entries, want 4", len(entries))
 	}
-	// Check all three entries are directories and have expected names
+	// Check all four entries are directories and have expected names
 	expectedNames := map[string]bool{
 		"blocks":   false,
 		"txs":      false,
 		"accounts": false,
+		"chain":    false,
 	}
 	for _, entry := range entries {
 		if _, ok := expectedNames[entry.Name]; !ok {

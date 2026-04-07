@@ -74,6 +74,9 @@ func main() {
 	// Create root node
 	root := ethfs.NewRootNode(client, cache)
 
+	// Start background refresh for volatile data
+	ethfs.StartBackgroundRefresh(client, cache)
+
 	// Mount the filesystem
 	server, err := mount(mountpoint, root)
 	if err != nil {

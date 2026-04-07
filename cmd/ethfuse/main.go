@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -71,11 +72,15 @@ func main() {
 		}
 	}()
 
+	// Create context that can be cancelled on shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	// Create root node
 	root := ethfs.NewRootNode(client, cache)
 
 	// Start background refresh for volatile data
-	ethfs.StartBackgroundRefresh(client, cache)
+	ethfs.StartBackgroundRefresh(ctx, client, cache)
 
 	// Mount the filesystem
 	server, err := mount(mountpoint, root)
@@ -90,6 +95,7 @@ func main() {
 	go func() {
 		<-sigChan
 		log.Println("Received shutdown signal, unmounting...")
+		cancel() // Stop background goroutines
 		if err := server.Unmount(); err != nil {
 			log.Printf("Warning: failed to unmount: %v", err)
 		}

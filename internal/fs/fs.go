@@ -36,6 +36,13 @@ func NewRootNode(rpc rpc.RPCClient, cache *cache.Cache) *RootNode {
 	}
 }
 
+// StartBackgroundRefresh starts background goroutines for refreshing volatile data.
+// This should be called once at startup after creating the RootNode.
+func StartBackgroundRefresh(rpc rpc.RPCClient, c *cache.Cache) {
+	// Start background refresh for latest_block (10s interval)
+	startBackgroundRefresh(c, rpc, cache.TTLChainLatestBlock)
+}
+
 // Lookup implements NodeLookuper.
 func (r *RootNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	switch name {
@@ -63,8 +70,15 @@ func (r *RootNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 		})
 		out.Mode = fuse.S_IFDIR | 0o755
 		return ch, 0
+	case "chain":
+		child := NewChainNode(r.rpc, r.cache)
+		ch := r.NewPersistentInode(ctx, child, fs.StableAttr{
+			Ino:  hashIno("/chain"),
+			Mode: fuse.S_IFDIR,
+		})
+		out.Mode = fuse.S_IFDIR | 0o755
+		return ch, 0
 	}
-	// Other directories (chain, ens) will be added later
 	return nil, syscall.ENOENT
 }
 
@@ -74,7 +88,7 @@ func (r *RootNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fu
 }
 
 // Readdir handles FUSE_READDIR requests.
-// Returns directory entries for root: blocks, txs.
+// Returns directory entries for root: blocks, txs, accounts, chain.
 func (r *RootNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	entries := []fuse.DirEntry{
 		{
@@ -91,6 +105,11 @@ func (r *RootNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 			Name: "accounts",
 			Mode: fuse.S_IFDIR,
 			Ino:  hashIno("/accounts"),
+		},
+		{
+			Name: "chain",
+			Mode: fuse.S_IFDIR,
+			Ino:  hashIno("/chain"),
 		},
 	}
 	return fs.NewListDirStream(entries), 0

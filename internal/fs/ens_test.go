@@ -2,6 +2,7 @@ package fs
 
 import (
 	"context"
+	"errors"
 	"math/big"
 	"strings"
 	"sync"
@@ -158,9 +159,13 @@ func (m *mockENSRPCClient) resolverCallCount(name string) int {
 }
 
 // TestENSDirNode_LookupValid tests that a valid .eth name resolves to a symlink.
-// Requires mounted FUSE bridge, so skipped for unit tests.
+// Note: Lookup with successful resolution requires a mounted FUSE bridge because
+// it calls NewPersistentInode which needs a bridge. This is consistent with other
+// node tests in blocks_test.go and txs_test.go where positive Lookup tests are skipped.
+// We test the resolution logic via TestResolveENS_Caching and symlink target via
+// TestENSNode_Readlink.
 func TestENSDirNode_LookupValid(t *testing.T) {
-	t.Skip("Lookup requires mounted bridge, skipping for now")
+	t.Skip("Lookup with successful resolution requires mounted bridge, consistent with other node tests")
 }
 
 // TestENSDirNode_LookupUnregistered tests that an unregistered name returns ENOENT.
@@ -246,5 +251,37 @@ func TestENSNode_Readlink(t *testing.T) {
 	expected := "../../accounts/" + strings.ToLower(addr.Hex()) + "/"
 	if string(target) != expected {
 		t.Errorf("Readlink returned %q, want %q", target, expected)
+	}
+}
+
+// TestResolveENS_NegativeCache tests that negative caching works for unregistered names.
+func TestResolveENS_NegativeCache(t *testing.T) {
+	mockRPC := newMockENSRPCClient()
+	cache := newTestCache(t)
+
+	name := "unregistered.eth"
+	// No resolver set in mock, so will return ethereum.NotFound
+
+	ctx := context.TODO()
+	// First call should return NotFound
+	_, err := ResolveENS(ctx, name, mockRPC, cache)
+	if !errors.Is(err, ethereum.NotFound) {
+		t.Fatalf("Expected NotFound error, got %v", err)
+	}
+	// Verify negative cache was set
+	key := cacheKeyENSPrefix + strings.ToLower(name)
+	if !cache.IsNegative(key) {
+		t.Error("Expected negative cache to be set for unregistered name")
+	}
+	// Second call should also return NotFound (served from negative cache)
+	// and should not increase RPC call count
+	registryCallsBefore := mockRPC.registryCallCount(name)
+	_, err = ResolveENS(ctx, name, mockRPC, cache)
+	if !errors.Is(err, ethereum.NotFound) {
+		t.Fatalf("Second call: Expected NotFound error, got %v", err)
+	}
+	registryCallsAfter := mockRPC.registryCallCount(name)
+	if registryCallsAfter != registryCallsBefore {
+		t.Errorf("Expected no additional RPC calls after negative cache, got %d -> %d", registryCallsBefore, registryCallsAfter)
 	}
 }

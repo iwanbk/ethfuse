@@ -317,6 +317,289 @@ func TestNewWithInvalidURL(t *testing.T) {
 	}
 }
 
+// blockMockResponse returns a complete block JSON result for go-ethereum's unmarshaler.
+// All header fields are required; omitting any causes unmarshal failure.
+func blockMockResponse(blockNumber string) map[string]interface{} {
+	logsBloom := "0x" + strings.Repeat("00", 256)
+	return map[string]interface{}{
+		"hash":                  "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+		"parentHash":            "0x0000000000000000000000000000000000000000000000000000000000000000",
+		"sha3Uncles":            "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+		"miner":                 "0x0000000000000000000000000000000000000000",
+		"stateRoot":             "0x0000000000000000000000000000000000000000000000000000000000000000",
+		"transactionsRoot":      "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+		"receiptsRoot":          "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+		"logsBloom":             logsBloom,
+		"difficulty":            "0x0",
+		"number":                blockNumber,
+		"gasLimit":              "0x1c9c380",
+		"gasUsed":               "0x0",
+		"timestamp":             "0x64000000",
+		"extraData":             "0x",
+		"mixHash":               "0x0000000000000000000000000000000000000000000000000000000000000000",
+		"nonce":                 "0x0000000000000000",
+		"baseFeePerGas":         "0x3b9aca00",
+		"withdrawalsRoot":       "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+		"blobGasUsed":           "0x0",
+		"excessBlobGas":         "0x0",
+		"parentBeaconBlockRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+		"transactions":          []interface{}{},
+		"uncles":                []interface{}{},
+		"withdrawals":           []interface{}{},
+	}
+}
+
+// txMockResponse returns a complete EIP-1559 transaction JSON result.
+func txMockResponse() map[string]interface{} {
+	return map[string]interface{}{
+		"hash":                 "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+		"nonce":                "0x5",
+		"blockHash":            "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+		"blockNumber":          "0x1312d00",
+		"transactionIndex":     "0x0",
+		"from":                 "0x1234567890123456789012345678901234567890",
+		"to":                   "0xabcdef1234567890abcdef1234567890abcdef12",
+		"value":                "0xde0b6b3a7640000",
+		"gas":                  "0x5208",
+		"gasPrice":             "0x3b9aca00",
+		"maxFeePerGas":         "0x77359400",
+		"maxPriorityFeePerGas": "0x3b9aca00",
+		"input":                "0x",
+		"v":                    "0x1",
+		"r":                    "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+		"s":                    "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+		"type":                 "0x2",
+		"chainId":              "0x1",
+		"accessList":           []interface{}{},
+	}
+}
+
+// respondJSON writes the given value as a JSON-RPC response.
+func respondJSON(w http.ResponseWriter, id interface{}, result interface{}) {
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"result":  result,
+	}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+// TestBlockByNumber tests the BlockByNumber method
+func TestBlockByNumber(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if method, _ := req["method"].(string); method == "eth_chainId" {
+				respondJSON(w, req["id"], "0x1")
+				return
+			}
+			respondJSON(w, req["id"], blockMockResponse("0x1312d00"))
+		}))
+		defer server.Close()
+
+		client, err := New(server.URL)
+		if err != nil {
+			t.Fatalf("Failed to create client: %v", err)
+		}
+		defer client.Close()
+
+		block, err := client.BlockByNumber(context.Background(), big.NewInt(20000000))
+		if err != nil {
+			t.Fatalf("BlockByNumber failed: %v", err)
+		}
+		if block == nil {
+			t.Fatal("Expected non-nil block")
+		}
+		if block.NumberU64() != 20000000 {
+			t.Errorf("Expected block number 20000000, got %d", block.NumberU64())
+		}
+	})
+
+	t.Run("not_found", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if method, _ := req["method"].(string); method == "eth_chainId" {
+				respondJSON(w, req["id"], "0x1")
+				return
+			}
+			respondJSON(w, req["id"], nil)
+		}))
+		defer server.Close()
+
+		client, err := New(server.URL)
+		if err != nil {
+			t.Fatalf("Failed to create client: %v", err)
+		}
+		defer client.Close()
+
+		_, err = client.BlockByNumber(context.Background(), big.NewInt(999999999))
+		if !errors.Is(err, ethereum.NotFound) {
+			t.Errorf("Expected ethereum.NotFound, got: %v", err)
+		}
+	})
+
+	t.Run("retry_on_rate_limit", func(t *testing.T) {
+		var attempts int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if method, _ := req["method"].(string); method == "eth_chainId" {
+				respondJSON(w, req["id"], "0x1")
+				return
+			}
+			if atomic.AddInt32(&attempts, 1) < 3 {
+				w.WriteHeader(http.StatusTooManyRequests)
+				return
+			}
+			respondJSON(w, req["id"], blockMockResponse("0x1312d00"))
+		}))
+		defer server.Close()
+
+		client, err := newClient(server.URL, false)
+		if err != nil {
+			t.Fatalf("Failed to create client: %v", err)
+		}
+		defer client.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		block, err := client.BlockByNumber(ctx, big.NewInt(20000000))
+		if err != nil {
+			t.Fatalf("Expected success after retries, got: %v", err)
+		}
+		if block == nil {
+			t.Fatal("Expected non-nil block")
+		}
+		if atomic.LoadInt32(&attempts) != 3 {
+			t.Errorf("Expected 3 attempts, got %d", atomic.LoadInt32(&attempts))
+		}
+	})
+}
+
+// TestTransactionByHash tests the TransactionByHash method
+func TestTransactionByHash(t *testing.T) {
+	txHash := common.HexToHash("0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890")
+
+	t.Run("success", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if method, _ := req["method"].(string); method == "eth_chainId" {
+				respondJSON(w, req["id"], "0x1")
+				return
+			}
+			respondJSON(w, req["id"], txMockResponse())
+		}))
+		defer server.Close()
+
+		client, err := New(server.URL)
+		if err != nil {
+			t.Fatalf("Failed to create client: %v", err)
+		}
+		defer client.Close()
+
+		tx, err := client.TransactionByHash(context.Background(), txHash)
+		if err != nil {
+			t.Fatalf("TransactionByHash failed: %v", err)
+		}
+		if tx == nil {
+			t.Fatal("Expected non-nil transaction")
+		}
+		if tx.Nonce() != 5 {
+			t.Errorf("Expected nonce 5, got %d", tx.Nonce())
+		}
+		wantValue := new(big.Int)
+		wantValue.SetString("1000000000000000000", 10) // 1 ETH
+		if tx.Value().Cmp(wantValue) != 0 {
+			t.Errorf("Expected value 1 ETH, got %s", tx.Value().String())
+		}
+	})
+
+	t.Run("not_found", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if method, _ := req["method"].(string); method == "eth_chainId" {
+				respondJSON(w, req["id"], "0x1")
+				return
+			}
+			respondJSON(w, req["id"], nil)
+		}))
+		defer server.Close()
+
+		client, err := New(server.URL)
+		if err != nil {
+			t.Fatalf("Failed to create client: %v", err)
+		}
+		defer client.Close()
+
+		_, err = client.TransactionByHash(context.Background(), txHash)
+		if !errors.Is(err, ethereum.NotFound) {
+			t.Errorf("Expected ethereum.NotFound, got: %v", err)
+		}
+	})
+
+	t.Run("retry_on_rate_limit", func(t *testing.T) {
+		var attempts int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if method, _ := req["method"].(string); method == "eth_chainId" {
+				respondJSON(w, req["id"], "0x1")
+				return
+			}
+			if atomic.AddInt32(&attempts, 1) < 3 {
+				w.WriteHeader(http.StatusTooManyRequests)
+				return
+			}
+			respondJSON(w, req["id"], txMockResponse())
+		}))
+		defer server.Close()
+
+		client, err := newClient(server.URL, false)
+		if err != nil {
+			t.Fatalf("Failed to create client: %v", err)
+		}
+		defer client.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		tx, err := client.TransactionByHash(ctx, txHash)
+		if err != nil {
+			t.Fatalf("Expected success after retries, got: %v", err)
+		}
+		if tx == nil {
+			t.Fatal("Expected non-nil transaction")
+		}
+		if atomic.LoadInt32(&attempts) != 3 {
+			t.Errorf("Expected 3 attempts, got %d", atomic.LoadInt32(&attempts))
+		}
+	})
+}
+
 // TestChainID tests the ChainID method
 func TestChainID(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

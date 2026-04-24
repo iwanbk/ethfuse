@@ -30,6 +30,11 @@ jobs:
       - name: Test
         run: go test ./...
 
+      - name: Integration Test
+        run: go test -tags=integration ./internal/fs/
+        env:
+          ETHFUSE_RPC_URL: ${{ secrets.ETHFUSE_RPC_URL }}
+
       - name: golangci-lint
         run: |
           go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest

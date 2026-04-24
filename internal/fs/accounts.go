@@ -181,6 +181,14 @@ func (afn *AccountFileNode) Getattr(ctx context.Context, f fs.FileHandle, out *f
 	return 0
 }
 
+// Open implements NodeOpener for AccountFileNode.
+func (afn *AccountFileNode) Open(_ context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
+	if flags&(syscall.O_WRONLY|syscall.O_RDWR) != 0 {
+		return nil, 0, syscall.EROFS
+	}
+	return nil, fuse.FOPEN_DIRECT_IO, 0
+}
+
 // Read implements NodeReader for AccountFileNode.
 func (afn *AccountFileNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	content, err := afn.fileContent(ctx)

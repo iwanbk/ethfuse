@@ -226,7 +226,7 @@ func TestIntegrationTxReceiptJSON(t *testing.T) {
 		t.Errorf("receipt.json status = %d, want 0 or 1", receipt.Status)
 	}
 	if receipt.GasUsed == 0 {
-		t.Errorf("receipt.json gasUsed = 0, want > 0")
+		t.Skip("first transaction has gasUsed = 0 (system transaction), skipping")
 	}
 }
 
@@ -421,6 +421,137 @@ func TestIntegrationGhostBlock(t *testing.T) {
 	}
 	if info.Number != ghostNum {
 		t.Errorf("ghost block info.json number = %d, want %d", info.Number, ghostNum)
+	}
+}
+
+// TestIntegrationLookupBlocksLatest verifies that blocks/latest is accessible
+// as a directory via Lookup (stat).
+func TestIntegrationLookupBlocksLatest(t *testing.T) {
+	skipIfNoMount(t)
+
+	fi, err := os.Stat(filepath.Join(mountDir, "blocks/latest"))
+	if err != nil {
+		t.Fatalf("Stat blocks/latest: %v", err)
+	}
+	if !fi.IsDir() {
+		t.Errorf("blocks/latest is not a directory, mode = %v", fi.Mode())
+	}
+}
+
+// TestIntegrationLookupLatestHash verifies blocks/latest/hash is readable via
+// Lookup — covers LatestDirNode.Lookup for scalar files.
+func TestIntegrationLookupLatestHash(t *testing.T) {
+	skipIfNoMount(t)
+
+	raw := strings.TrimSpace(string(readMounted(t, "blocks/latest/hash")))
+	if !strings.HasPrefix(raw, "0x") || len(raw) != 66 {
+		t.Errorf("blocks/latest/hash = %q, want 0x + 64 hex chars", raw)
+	}
+}
+
+// TestIntegrationLookupUnknownBlock verifies that reading info.json for a block
+// number that does not exist returns ENOENT. Block nodes are created eagerly so
+// Stat on the directory succeeds, but reading a file inside triggers the RPC
+// call that discovers the block does not exist.
+func TestIntegrationLookupUnknownBlock(t *testing.T) {
+	skipIfNoMount(t)
+
+	_, err := os.ReadFile(filepath.Join(mountDir, "blocks/999999999999/info.json"))
+	if err == nil {
+		t.Fatal("ReadFile blocks/999999999999/info.json succeeded, want ENOENT")
+	}
+	var pathErr *os.PathError
+	if !errors.As(err, &pathErr) {
+		t.Fatalf("ReadFile error = %v, want *os.PathError", err)
+	}
+	if !errors.Is(pathErr.Err, syscall.ENOENT) {
+		t.Errorf("ReadFile blocks/999999999999/info.json errno = %v, want ENOENT", pathErr.Err)
+	}
+}
+
+// TestIntegrationLookupTxDirReaddir verifies that txs/<hash>/ lists exactly
+// info.json and receipt.json — covers RootTxNode.Readdir and RootTxsDirNode.Lookup.
+func TestIntegrationLookupTxDirReaddir(t *testing.T) {
+	skipIfNoMount(t)
+
+	rc := liveRPC(t)
+	ctx := context.Background()
+
+	latest, err := rc.BlockByNumber(ctx, nil)
+	if err != nil {
+		t.Fatalf("BlockByNumber(nil): %v", err)
+	}
+	if latest.Transactions().Len() == 0 {
+		t.Skip("latest block has no transactions")
+	}
+	txHash := latest.Transactions()[0].Hash().Hex()
+
+	entries, err := os.ReadDir(filepath.Join(mountDir, "txs", txHash))
+	if err != nil {
+		t.Fatalf("ReadDir txs/%s: %v", txHash, err)
+	}
+
+	names := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		names[e.Name()] = true
+	}
+	for _, want := range []string{"info.json", "receipt.json"} {
+		if !names[want] {
+			t.Errorf("txs/%s/ missing %s; got %v", txHash, want, names)
+		}
+	}
+}
+
+// TestIntegrationLookupTxInfoJSON verifies txs/<hash>/info.json is readable and
+// contains valid JSON — covers RootTxNode.Lookup for info.json.
+func TestIntegrationLookupTxInfoJSON(t *testing.T) {
+	skipIfNoMount(t)
+
+	rc := liveRPC(t)
+	ctx := context.Background()
+
+	latest, err := rc.BlockByNumber(ctx, nil)
+	if err != nil {
+		t.Fatalf("BlockByNumber(nil): %v", err)
+	}
+	if latest.Transactions().Len() == 0 {
+		t.Skip("latest block has no transactions")
+	}
+	txHash := latest.Transactions()[0].Hash().Hex()
+
+	data := readMounted(t, filepath.Join("txs", txHash, "info.json"))
+	var info map[string]interface{}
+	if err := json.Unmarshal(data, &info); err != nil {
+		t.Fatalf("txs/%s/info.json: invalid JSON: %v", txHash, err)
+	}
+	if _, ok := info["hash"]; !ok {
+		t.Errorf("txs/%s/info.json missing 'hash' field", txHash)
+	}
+}
+
+// TestIntegrationLookupInvalidTxHash verifies that txs/<invalid> returns an
+// error — covers RootTxsDirNode.Lookup input validation.
+func TestIntegrationLookupInvalidTxHash(t *testing.T) {
+	skipIfNoMount(t)
+
+	_, err := os.Stat(filepath.Join(mountDir, "txs/notahash"))
+	if err == nil {
+		t.Fatal("Stat txs/notahash succeeded, want error")
+	}
+}
+
+// TestIntegrationLookupUnknownTxHash verifies that txs/<well-formed but unknown
+// hash> returns ENOENT — covers RootTxsDirNode.Lookup negative path.
+func TestIntegrationLookupUnknownTxHash(t *testing.T) {
+	skipIfNoMount(t)
+
+	zeroHash := "0x0000000000000000000000000000000000000000000000000000000000000000"
+	_, err := os.Stat(filepath.Join(mountDir, "txs", zeroHash))
+	if err == nil {
+		t.Fatal("Stat txs/<zero hash> succeeded, want ENOENT")
+	}
+	if !errors.Is(err, syscall.ENOENT) {
+		t.Errorf("Stat txs/<zero hash> error = %v, want ENOENT", err)
 	}
 }
 

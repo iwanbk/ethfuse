@@ -707,6 +707,14 @@ func (tfn *TxFileNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.A
 	return 0
 }
 
+// Open implements NodeOpener for TxFileNode.
+func (tfn *TxFileNode) Open(_ context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
+	if flags&(syscall.O_WRONLY|syscall.O_RDWR) != 0 {
+		return nil, 0, syscall.EROFS
+	}
+	return nil, fuse.FOPEN_DIRECT_IO, 0
+}
+
 // Read implements NodeReader for TxFileNode.
 func (tfn *TxFileNode) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	content, err := tfn.fileContent(ctx)
@@ -892,6 +900,14 @@ func (bfn *BlockFileNode) Getattr(ctx context.Context, f fs.FileHandle, out *fus
 	// Size unknown; we could compute but not required
 	out.Size = 0
 	return 0
+}
+
+// Open implements NodeOpener for BlockFileNode.
+func (bfn *BlockFileNode) Open(_ context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
+	if flags&(syscall.O_WRONLY|syscall.O_RDWR) != 0 {
+		return nil, 0, syscall.EROFS
+	}
+	return nil, fuse.FOPEN_DIRECT_IO, 0
 }
 
 // Read implements NodeReader for BlockFileNode.

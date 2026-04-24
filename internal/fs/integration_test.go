@@ -222,11 +222,11 @@ func TestIntegrationTxReceiptJSON(t *testing.T) {
 	if err := json.Unmarshal(data, &receipt); err != nil {
 		t.Fatalf("txs/%s/receipt.json: invalid JSON: %v", txHash.Hex(), err)
 	}
-	if receipt.Status != 0 && receipt.Status != 1 {
-		t.Errorf("receipt.json status = %d, want 0 or 1", receipt.Status)
-	}
 	if receipt.GasUsed == 0 {
 		t.Skip("first transaction has gasUsed = 0 (system transaction), skipping")
+	}
+	if receipt.Status != 0 && receipt.Status != 1 {
+		t.Errorf("receipt.json status = %d, want 0 or 1", receipt.Status)
 	}
 }
 
@@ -451,8 +451,8 @@ func TestIntegrationLookupLatestHash(t *testing.T) {
 
 // TestIntegrationLookupUnknownBlock verifies that reading info.json for a block
 // number that does not exist returns ENOENT. Block nodes are created eagerly so
-// Stat on the directory succeeds, but reading a file inside triggers the RPC
-// call that discovers the block does not exist.
+// ReadFile (not Stat) is used: the RPC call inside Read discovers the block
+// does not exist and returns ENOENT.
 func TestIntegrationLookupUnknownBlock(t *testing.T) {
 	skipIfNoMount(t)
 
@@ -536,7 +536,10 @@ func TestIntegrationLookupInvalidTxHash(t *testing.T) {
 
 	_, err := os.Stat(filepath.Join(mountDir, "txs/notahash"))
 	if err == nil {
-		t.Fatal("Stat txs/notahash succeeded, want error")
+		t.Fatal("Stat txs/notahash succeeded, want EINVAL")
+	}
+	if !errors.Is(err, syscall.EINVAL) {
+		t.Errorf("Stat txs/notahash error = %v, want EINVAL", err)
 	}
 }
 

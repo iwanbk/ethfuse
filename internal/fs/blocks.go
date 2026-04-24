@@ -580,6 +580,7 @@ type TxFileNode struct {
 	txHash   common.Hash
 }
 
+var _ fs.NodeOpener = (*TxFileNode)(nil)
 var _ fs.NodeReader = (*TxFileNode)(nil)
 var _ fs.NodeGetattrer = (*TxFileNode)(nil)
 
@@ -881,6 +882,7 @@ type BlockFileNode struct {
 	blockNum uint64
 }
 
+var _ fs.NodeOpener = (*BlockFileNode)(nil)
 var _ fs.NodeReader = (*BlockFileNode)(nil)
 var _ fs.NodeGetattrer = (*BlockFileNode)(nil)
 

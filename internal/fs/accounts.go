@@ -161,6 +161,7 @@ type AccountFileNode struct {
 	addr     common.Address
 }
 
+var _ fs.NodeOpener = (*AccountFileNode)(nil)
 var _ fs.NodeReader = (*AccountFileNode)(nil)
 var _ fs.NodeGetattrer = (*AccountFileNode)(nil)
 

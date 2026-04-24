@@ -175,8 +175,11 @@ var _ fs.NodeGetattrer = (*chainFileNode)(nil)
 var _ fs.NodeReader = (*chainFileNode)(nil)
 
 // Open implements fs.NodeOpener.
-func (n *chainFileNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
-	return nil, 0, 0
+func (n *chainFileNode) Open(_ context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
+	if flags&(syscall.O_WRONLY|syscall.O_RDWR) != 0 {
+		return nil, 0, syscall.EROFS
+	}
+	return nil, fuse.FOPEN_DIRECT_IO, 0
 }
 
 // Getattr implements fs.NodeGetattrer.

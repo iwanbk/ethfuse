@@ -1,6 +1,6 @@
 # ethfuse
 
-Mount the Ethereum blockchain as a FUSE filesystem. Navigate blocks, transactions, accounts, and ENS names as ordinary files and directories.
+Ethereum on your filesystem. Explore blocks, transactions, and accounts with `cat`, `ls`, and shell scripts — pipe it, `grep` it, no SDK, no ABI, no boilerplate.
 
 ```bash
 cat /mnt/eth/chain/latest_block
